@@ -33,12 +33,14 @@ Dica ligada a mais de uma audiência usa OR. Uma saída em uma audiência só re
 Todas as rotas ficam sob `/internal/v1`. As rotas administrativas exigem access token válido do Keycloak com `realm_access.roles` contendo `admin`; tokens de proprietário de fazenda não podem gerenciar audiências.
 
 - `GET /users/{user_id}/audiences`: proprietário consulta apenas o próprio `database_id`; admin consulta qualquer ID positivo.
-- `GET /admin/audiences?search=...`, `GET /admin/audiences/{key}`, `POST /admin/audiences`, `PUT /admin/audiences/{key}` e `DELETE /admin/audiences/{key}` oferecem busca e CRUD das definições. A validação aceita apenas métricas já implementadas pelo Engine.
+- `GET /admin/audiences?search=...`, `GET /admin/audiences/{key}`, `POST /admin/audiences`, `PUT /admin/audiences/{key}` e `DELETE /admin/audiences/{key}` oferecem busca e CRUD das definições; todas exigem role administrativa Keycloak. A validação aceita apenas métricas já implementadas pelo Engine.
 - `GET /admin/tips?search=...&limit=...&offset=...` pesquisa IDs e textos de dicas existentes.
 - `PUT /admin/audiences/{key}/tips/{tip_id}` habilita o vínculo com uma dica; `DELETE` nessa rota remove o vínculo. A resolução só retorna a dica quando o snapshot da audiência contém o usuário.
 
 Alterar qualquer campo da definição além de `version` exige uma nova versão. A versão nova invalida o snapshot anterior, que o Engine recalcula na próxima consulta de participação. Ao excluir uma audiência, o Engine remove as chaves bitmap/manifest do Redis e as referências do PostgreSQL antes de remover a definição do MongoDB. Esses bancos não compartilham transação; uma falha durante a exclusão pode exigir reparo administrativo.
 
-O role de metadados do banco precisa receber os grants de `migrations/002_audience_admin_api.sql` antes de essas rotas pesquisarem dicas ou alterarem vínculos. As credenciais de produção também precisam de acesso de leitura/escrita com privilégio mínimo à coleção MongoDB de audiências.
+Após POST/PUT/DELETE da definição, somente o processo API que atendeu a requisição recarrega sua configuração. Em instalações com vários workers/replicas, reinicie os demais processos; alterações diretas no Mongo exigem reiniciar todos. `run-once` lê as definições atuais a cada execução.
+
+O role de metadados do banco precisa receber os grants de `migrations/002_audience_admin_api.sql` antes de essas rotas pesquisarem dicas ou alterarem vínculos. A credencial `MONGODB_URI` do serviço precisa de `find`, `insert`, `update` e `remove` restritos à coleção de definições; provisionar o índice único de `key` separadamente.
 
 As dicas de produção inspecionadas não têm predicados de regra aprovados para todos os temas, e o SQL não expõe os campos necessários para várias delas. Não crie nem habilite audiências de produção apenas com base no texto da dica; valide a semântica de participação com o responsável pelo produto.

@@ -90,11 +90,11 @@ make lint
 make typecheck
 ```
 
-O CI roda pytest com relatório de cobertura (sem limite mínimo), Ruff e mypy; valida o Compose e faz build da imagem. CodeQL roda como análise separada. Para testar o stack local, `make up` seguido dos comandos de demo exercita Postgres, Redis, publicação, resolução e rebuild após perda de snapshot.
+O CI roda pytest com cobertura mínima de 80%, Ruff e mypy; valida o Compose e faz build da imagem. CodeQL roda como análise separada. Para testar o stack local, `make up` seguido dos comandos de demo exercita Postgres, Redis, publicação, resolução e rebuild após perda de snapshot.
 
 ## Configuração
 
-Cada documento em `ouros_audience.audience_definitions` define uma audiência; o modelo Pydantic valida os campos e `key` tem índice único. Mongo guarda regras, nunca usuários ou membership. A API carrega definições ao iniciar; depois de inserir/alterar uma definição, reinicie a API. O scheduler CLI recarrega as definições a cada execução. O banco de produção foi criado vazio: não promova a fixture QA como regra real.
+Cada documento em `ouros_audience.audience_definitions` define uma audiência; o modelo Pydantic valida os campos e `key` tem índice único. Mongo guarda regras, nunca usuários ou membership. A API carrega definições ao iniciar; alterações via rotas administrativas atualizam apenas o processo que atendeu à requisição. Reinicie os demais processos/replicas após CRUD por API; alterações diretas no Mongo exigem reiniciar todos os processos da API. A CLI recarrega definições a cada execução. O banco de produção foi criado vazio: não promova a fixture QA como regra real.
 
 Variáveis disponíveis estão em `.env.example`. Valores e senhas ali são exemplos locais, não segredos reutilizáveis. Em produção use secret manager e TLS para PostgreSQL, MongoDB, Redis e HTTP; configure Redis com `noeviction`, persistência RDB em armazenamento durável e backups/retention do provedor. RDB é periódico e, sozinho, pode perder alterações desde o último snapshot.
 

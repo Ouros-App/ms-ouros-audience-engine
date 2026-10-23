@@ -45,16 +45,35 @@ def main() -> None:
 
     runtime = build_runtime(settings)
     try:
+        failed = False
+        results: list[dict[str, object]] = []
         with runtime.metadata.publish_job_lock():
-            results = [
-                runtime.publisher.publish(
-                    audience,
-                    evaluated_at=args.as_of,
-                    dry_run=args.dry_run,
-                )
-                for audience in runtime.config.audiences
-            ]
-        print(json.dumps([asdict(result) for result in results], default=_json_default, indent=2))
+            for audience in runtime.config.audiences:
+                try:
+                    result = runtime.publisher.publish(
+                        audience,
+                        evaluated_at=args.as_of,
+                        dry_run=args.dry_run,
+                    )
+                except Exception as exc:
+                    failed = True
+                    error_type = type(exc).__name__
+                    print(
+                        f"audience {audience.key} failed ({error_type})",
+                        file=sys.stderr,
+                    )
+                    results.append(
+                        {
+                            "audience_key": audience.key,
+                            "status": "FAILED",
+                            "error": error_type,
+                        }
+                    )
+                else:
+                    results.append(asdict(result))
+        print(json.dumps(results, default=_json_default, indent=2))
+        if failed:
+            raise SystemExit(1)
     finally:
         runtime.mongo_client.close()
         runtime.redis_client.close()  # type: ignore[no-untyped-call]

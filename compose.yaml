@@ -42,7 +42,7 @@ services:
       - mongo_data:/data/db
       - ./docker/mongo/001_audience_demo.js:/docker-entrypoint-initdb.d/001_audience_demo.js:ro
     healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok", "mongodb://localhost:27017/admin"]
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok", "mongodb://mongo:27017/admin"]
       interval: 5s
       timeout: 3s
       retries: 20

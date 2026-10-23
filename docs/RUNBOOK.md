@@ -12,9 +12,9 @@ make down
 
 Recriar fixtures limpas é destrutivo para dados locais: `docker compose down -v`, depois `make up`. Não executar esse comando em contexto que contenha dados a preservar.
 
-Mongo local usa `ouros_audience.audience_definitions` no volume `mongo_data`; o init script cria somente uma regra sintética para demo, nunca para produção. Definições de produção precisam ser inseridas por um principal administrativo autorizado. A API lê no startup; reinicie-a após alteração. CLI recarrega ao iniciar.
+Mongo local usa `ouros_audience.audience_definitions` no volume `mongo_data`; o init script cria somente uma regra sintética para demo, nunca para produção. Use as rotas administrativas da API para gerenciar definições. Cada gravação recarrega apenas o processo que atendeu à requisição; reinicie os demais workers/réplicas. Alterações diretas no Mongo exigem reinício de todos os processos da API. A CLI carrega as definições ao iniciar cada execução.
 
-Antes do deploy, disponibilize `MONGODB_URI` em `/ms-ouros-audience-engine` no Infisical, usando um usuário Mongo com leitura limitada à coleção; não reutilize a URI `atlasAdmin` que foi usada para provisionar o banco.
+Antes do deploy, disponibilize `MONGODB_URI` em `/ms-ouros-audience-engine` no Infisical, com uma role customizada restrita a `find`, `insert`, `update` e `remove` na coleção `ouros_audience.audience_definitions`. Aplique separadamente o índice único de `key`; a aplicação não cria índices e a credencial de serviço não precisa de `createIndex`. Não reutilize a URI `atlasAdmin` usada para provisionar o banco.
 
 Redis local executa RDB (`save 60 1`) e mantém AOF habilitado; os arquivos ficam no volume `redis_data`. RDB é periódico e pode omitir alterações recentes se a persistência AOF também falhar. Não remova o volume. Em produção, habilite RDB/backups no provedor em armazenamento durável e confirme retenção e política `noeviction`.
 
@@ -28,7 +28,7 @@ Exemplo de crontab para uma instalação que já tenha secrets e serviços confi
 */30 * * * * /opt/ouros-audience-engine/venv/bin/ouros-audience-engine run-once --publish
 ```
 
-O processo imprime JSON por audiência; erro é escrito em stderr e resulta em falha de processo. Supervisione exit code/log do scheduler. Não há cron instalado pelo Compose, job-health persistente, métricas Prometheus nem alertas neste repo.
+O processo imprime JSON por audiência; falhas individuais são incluídas como `FAILED`, registradas em stderr sem a mensagem da exceção e não interrompem as audiências seguintes. Depois de processar todas, qualquer falha retorna exit code `1`. Supervisione exit code/log do scheduler. Não há cron instalado pelo Compose, job-health persistente, métricas Prometheus nem alertas neste repo.
 
 ## Incidentes
 

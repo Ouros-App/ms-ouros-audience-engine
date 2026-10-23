@@ -10,7 +10,7 @@ A migration `migrations/001_audience_metadata.sql` cria apenas `audience_snapsho
 
 Cada documento de `ouros_audience.audience_definitions` representa um `WaterAudienceConfig`; `_id` é gerado pelo Mongo e ignorado pelo loader. `key` é único. O restante do documento segue os campos e limites tipados no modelo Pydantic: `version`, `enabled`, `subject`, `member_id_space`, `source`, `metric`, `period`, `baseline`, `activation_pct`, `resolution_pct`, `min_baseline_samples`, `max_observation_age_days`, `unknown_policy` e `first_run_push`.
 
-O loader rejeita documentos inválidos ou com campos extras; falha de validação impede a inicialização em vez de aplicar defaults silenciosos. Mongo guarda apenas definições, nunca IDs de usuários ou resultados do filtro. A API carrega as definições no startup; alterações exigem reinício da API. `run-once` recarrega ao iniciar cada processo. Não existe endpoint administrativo de CRUD neste MVP.
+O loader rejeita documentos inválidos ou com campos extras; falha de validação impede a inicialização em vez de aplicar defaults silenciosos. Mongo guarda apenas definições, nunca IDs de usuários ou resultados do filtro. A API carrega definições ao iniciar; alterações por CRUD administrativo atualizam somente o processo que atende à requisição. Outras instâncias/processos precisam reiniciar para refletir a mudança. Alterações diretas no Mongo exigem reiniciar todos os processos da API. `run-once` carrega definições frescas ao iniciar cada execução.
 
 ## Regra QA `high_water_consumption`
 
@@ -37,3 +37,9 @@ Esta regra é didática e não aprovada por negócio/agronomia. O schema fixture
 `POST /internal/v1/tips/resolve` exige um access token Keycloak RS256 com `iss`, `exp`, `iat`, `sub` e audience `ms-ouros-audience-engine`; o token precisa conter `account_type=farm_owner`, role `farm_owner`, `database_id` e `farm_id` positivos. O `user_id` do JSON deve corresponder ao `database_id` assinado. O restante do JSON é estrito: `{user_id, user_role: "FARM_OWNER", request_id}`. IDs inválidos, papéis diferentes e campos extras são rejeitados. Erro de assinatura/JWKS é `401`/`503`; identidade sem permissão é `403`.
 
 Os textos de dicas pertencem à integração Spring documentada em [SPRING_INTEGRATION.md](SPRING_INTEGRATION.md); a API valida independentemente o access token Keycloak.
+
+## Endpoints administrativos
+
+As rotas `/internal/v1/admin/...` exigem access token Keycloak válido com role `admin`. O CRUD em `/admin/audiences` cria, busca, lista, edita e exclui definições Mongo; `/admin/tips` busca dicas, e as rotas `/admin/audiences/{key}/tips/{tip_id}` gerenciam vínculos PostgreSQL. A resolução de tips recebe somente a identidade do usuário, nunca uma definição de audiência enviada pelo cliente.
+
+Após POST/PUT/DELETE de definição, o processo API que atendeu a chamada recarrega sua configuração. Em deployments com múltiplos workers ou réplicas, os demais processos permanecem com a configuração anterior até reiniciarem. Alterações feitas diretamente no Mongo não atualizam nenhum processo em execução. Cada execução `run-once` lê a configuração atual do Mongo.

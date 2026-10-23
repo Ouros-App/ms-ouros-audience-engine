@@ -6,13 +6,13 @@
 - Modelo Pydantic rejeita campos extras, papéis diferentes de `FARM_OWNER` e IDs fora do domínio suportado.
 - A conexão à origem PostgreSQL abre transação read-only; o schema local concede ao `audience_source` somente SELECT em tabelas operacionais.
 - Conta `audience_metadata` tem SELECT em catálogo/vínculos e SELECT/INSERT/UPDATE apenas em referências de snapshot; não recebe grants de escrita na origem.
-- Definições Mongo são validadas pelo modelo Pydantic; a API não as aceita de clientes e não armazena membership no Mongo.
+- A resolução não aceita definições de audiência enviadas por clientes e Mongo nunca armazena membership. Rotas administrativas permitem criar, alterar e remover definições com token Keycloak e role `admin`; o `MONGODB_URI` único do serviço lê e grava apenas `ouros_audience.audience_definitions`.
 - As portas dos serviços Compose são publicadas apenas em `127.0.0.1`; Postgres, Mongo, Redis usam fixtures locais e não substituem serviços de produção.
 
 ## Requisitos antes de qualquer ambiente real
 
 1. Confirmar rede privada e TLS até o serviço; manter o issuer/JWKS Keycloak confiável e a audience `ms-ouros-audience-engine` configurada no client de emissão.
-2. Criar roles PostgreSQL separadas com grants mínimos e um usuário MongoDB somente de leitura em `ouros_audience.audience_definitions`; use outro principal restrito para administrar regras. Não use credencial `atlasAdmin` no serviço.
+2. Criar roles PostgreSQL separadas com grants mínimos. Para Mongo, use role customizada limitada a `find`, `insert`, `update` e `remove` na coleção `ouros_audience.audience_definitions`; provisionar o índice único de `key` fora da credencial da aplicação. Não reutilize `atlasAdmin` no serviço.
 3. Configurar Redis de produção com TLS/autenticação, capacidade suficiente e política `noeviction`; habilitar persistência RDB em armazenamento durável e backups/retention do provedor. RDB é periódico, não garante perda zero; a aplicação reconstrói snapshots ausentes, mas um bootstrap novo pode alterar membership em fazendas UNKNOWN ou na faixa de histerese.
 4. Configurar TLS/autenticação para PostgreSQL, MongoDB e Redis. O Redis local grava RDB a cada 60 segundos após ao menos uma alteração, mantém AOF habilitado e usa volume Docker; isso não é backup de produção.
 5. Colocar API atrás de rede interna/gateway TLS, rate limit, timeouts e auditoria de chamada. Endpoints `/docs`/OpenAPI não devem ser expostos publicamente.

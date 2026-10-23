@@ -2,7 +2,7 @@
 
 ## Fluxo neste repositório
 
-1. API carrega definições de audiência do MongoDB ao iniciar; CLI carrega as definições a cada execução. Ambos usam PostgreSQL de origem/metadados e Redis.
+1. API carrega definições de audiência do MongoDB ao iniciar; CRUD administrativo recarrega a configuração somente no processo que atende à chamada. Outros processos/replicas precisam reiniciar, e mudanças diretas no Mongo exigem reiniciar todos os processos. A CLI carrega definições frescas a cada execução. Ambos usam PostgreSQL de origem/metadados e Redis.
 2. `SourcePostgresRepository` usa `default_transaction_read_only=on`, consulta fazendas/proprietários e agrega leituras por mês fechado.
 3. `WaterConsumptionRule` compara o período mais recente com a mediana dos três meses consecutivos anteriores, aplica histerese/freshness e retorna ACTIVE, RESOLVED ou UNKNOWN.
 4. `AudiencePublisher` expande cada fazenda aos seus `farm_owners`, serializa `pyroaring.BitMap`, grava bitmap e manifest versionados no Redis e publica o ponteiro PostgreSQL via CAS.
