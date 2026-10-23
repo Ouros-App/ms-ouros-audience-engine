@@ -1,0 +1,83 @@
+services:
+  postgres:
+    image: postgres:16.6-alpine
+    environment:
+      POSTGRES_DB: audience
+      POSTGRES_USER: audience_owner
+      POSTGRES_PASSWORD: audience_owner_local_only
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/000_roles.sql:/docker-entrypoint-initdb.d/000_roles.sql:ro
+      - ./docker/postgres/001_source_schema.sql:/docker-entrypoint-initdb.d/001_source_schema.sql:ro
+      - ./migrations/001_audience_metadata.sql:/docker-entrypoint-initdb.d/002_audience_metadata.sql:ro
+      - ./migrations/002_audience_admin_api.sql:/docker-entrypoint-initdb.d/003_audience_admin_api.sql:ro
+      - ./docker/postgres/003_grants.sql:/docker-entrypoint-initdb.d/004_grants.sql:ro
+      - ./docker/postgres/004_demo_seed.sql:/docker-entrypoint-initdb.d/005_demo_seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U audience_owner -d audience"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7.4.2-alpine
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1"]
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  mongo:
+    image: mongo:8.0
+    environment:
+      AUDIENCE_DATABASE_NAME: ouros_audience
+    volumes:
+      - mongo_data:/data/db
+      - ./docker/mongo/001_audience_demo.js:/docker-entrypoint-initdb.d/001_audience_demo.js:ro
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok", "mongodb://mongo:27017/admin"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+
+
+  api:
+    image: ouros-audience-engine:local
+    build: .
+    environment:
+      ENVIRONMENT: development
+      KEYCLOAK_ISSUER_URL: ${KEYCLOAK_ISSUER_URL:-https://ouros-keycloak.discloud.app/realms/ouros}
+      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-ms-ouros-audience-engine}
+      KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-https://ouros-keycloak.discloud.app/realms/ouros/protocol/openid-connect/certs}
+      SOURCE_DATABASE_URL: postgresql://audience_source:audience_source_local_only@postgres:5432/audience
+      METADATA_DATABASE_URL: postgresql://audience_metadata:audience_metadata_local_only@postgres:5432/audience
+      REDIS_URL: redis://redis:6379/0
+      MONGODB_URI: mongodb://mongo:27017
+      AUDIENCE_DATABASE_NAME: ouros_audience
+    ports:
+      - "127.0.0.1:${APP_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
+  mongo_data:
