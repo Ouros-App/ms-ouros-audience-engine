@@ -9,25 +9,23 @@ description = "Deterministic audience snapshots for Ouros tips"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
 dependencies = [
-  "boto3==1.35.99",
   "fastapi==0.115.6",
+  "PyJWT[crypto]>=2.14,<3",
   "pydantic-settings==2.7.0",
   "psycopg[binary]==3.2.10",
   "pyroaring==1.0.3",
-  "PyYAML==6.0.2",
+  "pymongo[srv]==4.10.1",
   "redis==5.2.1",
   "uvicorn[standard]==0.34.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "boto3-stubs[s3]==1.35.99",
   "httpx==0.28.1",
   "mypy==1.14.1",
   "pytest==8.3.4",
   "pytest-cov==6.0.0",
   "ruff==0.8.6",
-  "types-PyYAML==6.0.12.20250516",
 ]
 
 [project.scripts]

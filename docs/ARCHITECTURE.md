@@ -2,19 +2,19 @@
 
 ## Fluxo neste repositório
 
-1. CLI de processo único lê YAML e abre adaptadores PostgreSQL, S3 e Redis.
-2. `SourcePostgresRepository` usa conexão `default_transaction_read_only=on`, consulta farms/owners e agrega leituras pelo mês fechado.
+1. API carrega definições de audiência do MongoDB ao iniciar; CLI carrega as definições a cada execução. Ambos usam PostgreSQL de origem/metadados e Redis.
+2. `SourcePostgresRepository` usa `default_transaction_read_only=on`, consulta fazendas/proprietários e agrega leituras por mês fechado.
 3. `WaterConsumptionRule` compara o período mais recente com a mediana dos três meses consecutivos anteriores, aplica histerese/freshness e retorna ACTIVE, RESOLVED ou UNKNOWN.
-4. `AudiencePublisher` expande cada fazenda aos IDs de seus `farm_owners`, preserva membros em avaliação UNKNOWN, serializa `pyroaring.BitMap`, escreve objetos e manifests com chaves imutáveis e publica o ponteiro via CAS.
-5. FastAPI recebe `user_id` e `FARM_OWNER` somente de um cliente interno autenticado, carrega tip links e verifica membership no bitmap versionado. Texto de dica não sai deste serviço.
-6. `BitmapReader` consulta Redis; em miss/invalidez, valida bytes buscados no S3 e tenta preencher cache. Erro de snapshot propaga como `503` na API.
+4. `AudiencePublisher` expande cada fazenda aos seus `farm_owners`, serializa `pyroaring.BitMap`, grava bitmap e manifest versionados no Redis e publica o ponteiro PostgreSQL via CAS.
+5. FastAPI recebe `user_id` e `FARM_OWNER` apenas de cliente interno autenticado, carrega os vínculos de dicas e verifica membership no Redis. Se o snapshot estiver ausente, reconstrói de forma síncrona sob o mesmo advisory lock do scheduler. O texto da dica fica fora deste serviço.
 
 ## Persistência
 
-- PostgreSQL guarda `audience_snapshot_refs` (um ponteiro e cursor agregado por audiência) e `tip_audience_refs` (vínculos tip→audience). Não grava lista, array ou linha por membro.
-- S3 guarda bitmap, manifest do snapshot, bitmaps de transição e manifest de transição; chaves contêm audiência, versão e digest.
-- Redis contém bytes do Roaring com chave versionada e TTL. Redis não é fonte de verdade nem fila durável.
-- PostgreSQL e S3 não têm transação distribuída: objetos imutáveis são gravados primeiro; CAS do ponteiro ocorre por último. Conflito pode deixar objeto órfão, sem substituir o ponteiro publicado.
+PostgreSQL guarda `audience_snapshot_refs` (ponteiro do snapshot, digest, versão da regra e timestamps) e `tip_audience_refs`; não armazena IDs de membros. MongoDB guarda apenas os documentos de regra em `ouros_audience.audience_definitions`; não contém usuários nem membership.
+
+Redis é o armazenamento principal dos snapshots. Bitmap e manifest usam chaves versionadas sem TTL. Um reset do Redis apaga os snapshots; a API os reconstrói usando a definição Mongo e a base PostgreSQL de origem como bootstrap novo.
+
+Bitmap e manifest são gravados antes do CAS dos metadados. Um CAS malsucedido pode deixar chaves Redis sem referência; histórico de transições e coleta de lixo não fazem parte do MVP.
 
 ## Identidade e regra fixture
 
@@ -24,8 +24,8 @@
 
 ## Processos e limites externos
 
-A API não agenda jobs. O scheduler externo executa `ouros-audience-engine run-once --publish` a cada 30 minutos UTC. A CLI mantém um advisory lock de sessão no Postgres por até 60 segundos enquanto aguarda, serializando os jobs entre processos; o lock é liberado ao concluir ou fechar a conexão. CAS continua sendo a última proteção do ponteiro. Chamadores que contornem a CLI não adquirem esse lock.
+A API não agenda jobs. O scheduler externo executa `ouros-audience-engine run-once --publish` a cada 30 minutos UTC. Rebuilds disparados pela API usam o mesmo advisory lock PostgreSQL e verificam o Redis novamente após adquiri-lo.
 
-Os manifests atuais preservam deltas `added`, `removed-resolved` e `removed-access-revoked`. Não há dispatcher implementado, consumidor Spring nem envio FCM. O cursor `dispatched_through_version` não avança automaticamente; não trate seus deltas como notificação entregue. Isso é uma fronteira deliberada enquanto não houver contrato de ingestão idempotente aprovado.
+Histórico de transições, replay de eventos e entrega via FCM ficam fora deste MVP. A saída do job pode informar deltas em memória, mas nenhum artefato de transição é armazenado; a coluna legada `dispatched_through_version` não é usada.
 
-Ver [ADR-0001](adr/0001-s3-roaring-redis.md) e [ADR-0002](adr/0002-notification-delivery.md) para decisões e limitações.
+Ver [ADR-0001](adr/0001-s3-roaring-redis.md) e [ADR-0002](adr/0002-notification-delivery.md) para as decisões de storage e entrega.

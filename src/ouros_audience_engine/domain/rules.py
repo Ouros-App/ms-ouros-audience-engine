@@ -40,7 +40,6 @@ class WaterConsumptionRule:
         periods: list[MeasurementPeriod],
         *,
         was_member: bool,
-        previous_watermark: datetime | None,
         evaluated_at: datetime,
     ) -> RuleOutcome:
         if evaluated_at.tzinfo is None:
@@ -59,15 +58,11 @@ class WaterConsumptionRule:
             days=self.max_observation_age_days
         ):
             return RuleOutcome(Evaluation.UNKNOWN, watermark, reason="STALE_OBSERVATION")
-        if previous_watermark is not None:
-            if previous_watermark.tzinfo is None:
-                return RuleOutcome(
-                    Evaluation.UNKNOWN, watermark, reason="INVALID_PREVIOUS_WATERMARK"
-                )
-            if watermark.astimezone(UTC) <= previous_watermark.astimezone(UTC):
-                return RuleOutcome(Evaluation.UNKNOWN, watermark, reason="NO_NEW_MEASUREMENT")
-
         latest_key = _month_key(latest)
+        evaluated_utc = evaluated_at.astimezone(UTC)
+        if latest_key != _previous_month_key((evaluated_utc.year, evaluated_utc.month)):
+            return RuleOutcome(Evaluation.UNKNOWN, watermark, reason="MISSING_LATEST_PERIOD")
+
         baseline = ordered[:-1]
         if len(baseline) < self.min_baseline_samples:
             return RuleOutcome(Evaluation.UNKNOWN, watermark, reason="INSUFFICIENT_BASELINE")

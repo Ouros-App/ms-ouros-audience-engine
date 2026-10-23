@@ -23,11 +23,22 @@ class SnapshotRef:
     rule_version: str
     source_watermark: datetime | None
     evaluated_at: datetime | None
-    dispatched_through_version: int
 
+
+
+@dataclass(frozen=True, slots=True)
+class Tip:
+    id: int
+    tip: str
+
+
+@dataclass(frozen=True, slots=True)
+class TipAudienceLink:
+    tip_id: int
+    enabled: bool
 
 class MetadataPostgresRepository:
-    """Persists only audience pointers, reviewed tip links and one cursor per audience."""
+    """Persists audience pointers and reviewed tip links; snapshot bytes live in Redis."""
 
     def __init__(self, database_url: str, timeout_seconds: int = 5) -> None:
         self.database_url = database_url
@@ -45,6 +56,7 @@ class MetadataPostgresRepository:
 
     @staticmethod
     def _snapshot(row: dict[str, Any]) -> SnapshotRef:
+        # shortcut: s3_* stores Redis keys; rename them in a production schema migration.
         return SnapshotRef(
             audience_key=str(row["audience_key"]),
             snapshot_version=int(row["snapshot_version"]),
@@ -54,7 +66,6 @@ class MetadataPostgresRepository:
             rule_version=str(row["rule_version"]),
             source_watermark=row["source_watermark"],
             evaluated_at=row["evaluated_at"],
-            dispatched_through_version=int(row["dispatched_through_version"]),
         )
 
     @contextmanager
@@ -124,9 +135,7 @@ class MetadataPostgresRepository:
                 """
                 SELECT refs.audience_key, refs.tip_id
                 FROM tip_audience_refs AS refs
-                JOIN audience_snapshot_refs AS snapshots USING (audience_key)
                 WHERE refs.enabled IS TRUE
-                  AND snapshots.snapshot_version > 0
                   AND refs.audience_key = ANY(%s)
                 ORDER BY refs.audience_key, refs.tip_id
                 """,
@@ -136,6 +145,84 @@ class MetadataPostgresRepository:
             for row in cursor.fetchall():
                 result[str(row["audience_key"])].append(int(row["tip_id"]))
         return result
+
+    def list_tips(self, search: str | None, limit: int, offset: int) -> list[Tip]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, tip
+                FROM public.tips
+                WHERE (%s::text IS NULL OR position(%s in lower(tip)) > 0)
+                ORDER BY id
+                LIMIT %s OFFSET %s
+                """,
+                (
+                    search.lower() if search else None,
+                    search.lower() if search else None,
+                    limit,
+                    offset,
+                ),
+            )
+            return [Tip(id=int(row["id"]), tip=str(row["tip"])) for row in cursor.fetchall()]
+
+    def tip_links_for_audiences(
+        self, audience_keys: list[str]
+    ) -> dict[str, list[TipAudienceLink]]:
+        if not audience_keys:
+            return {}
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT audience_key, tip_id, enabled
+                FROM tip_audience_refs
+                WHERE audience_key = ANY(%s)
+                ORDER BY audience_key, tip_id
+                """,
+                (audience_keys,),
+            )
+            result: dict[str, list[TipAudienceLink]] = {key: [] for key in audience_keys}
+            for row in cursor.fetchall():
+                result[str(row["audience_key"])].append(
+                    TipAudienceLink(tip_id=int(row["tip_id"]), enabled=bool(row["enabled"]))
+                )
+        return result
+
+    def link_tip(self, audience_key: str, tip_id: int, rule_version: str) -> bool:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("SELECT 1 FROM public.tips WHERE id = %s", (tip_id,))
+            if cursor.fetchone() is None:
+                return False
+            cursor.execute(
+                """
+                INSERT INTO audience_snapshot_refs (audience_key, rule_version)
+                VALUES (%s, %s)
+                ON CONFLICT (audience_key) DO NOTHING
+                """,
+                (audience_key, rule_version),
+            )
+            cursor.execute(
+                """
+                INSERT INTO tip_audience_refs (tip_id, audience_key, enabled)
+                VALUES (%s, %s, TRUE)
+                ON CONFLICT (tip_id, audience_key) DO UPDATE SET enabled = TRUE
+                """,
+                (tip_id, audience_key),
+            )
+        return True
+
+    def unlink_tip(self, audience_key: str, tip_id: int) -> None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                "DELETE FROM tip_audience_refs WHERE audience_key = %s AND tip_id = %s",
+                (audience_key, tip_id),
+            )
+
+    def delete_audience(self, audience_key: str) -> None:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute("DELETE FROM tip_audience_refs WHERE audience_key = %s", (audience_key,))
+            cursor.execute(
+                "DELETE FROM audience_snapshot_refs WHERE audience_key = %s", (audience_key,)
+            )
 
     def publish_snapshot(
         self,
@@ -206,23 +293,6 @@ class MetadataPostgresRepository:
             if row is None:
                 raise ConcurrentPublishError(f"snapshot pointer changed: {audience_key}")
         return self._snapshot(row)
-
-    def advance_dispatch_cursor(
-        self, audience_key: str, expected_version: int, new_version: int
-    ) -> None:
-        with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE audience_snapshot_refs
-                SET dispatched_through_version = %s
-                WHERE audience_key = %s
-                  AND dispatched_through_version = %s
-                  AND snapshot_version >= %s
-                """,
-                (new_version, audience_key, expected_version, new_version),
-            )
-            if cursor.rowcount != 1:
-                raise ConcurrentPublishError(f"dispatch cursor changed: {audience_key}")
 
     def active_audiences(self) -> list[SnapshotRef]:
         with self._connect() as connection, connection.cursor() as cursor:

@@ -5,8 +5,8 @@ Esta nota é contrato de integração proposto, não implementação nem confirm
 ## Resolução para `GET /tips/me`
 
 1. Spring autentica JWT e deriva `user_id` e role do principal verificado; não aceita esses valores do Android como parâmetro.
-2. Para role `FARM_OWNER`, Spring chama `POST /internal/v1/tips/resolve` uma vez por requisição, com TLS/rede interna e service bearer.
-3. Enviar `{ "user_id": <id do principal>, "user_role": "FARM_OWNER", "request_id": "<UUID>" }`.
+2. Para role `FARM_OWNER`, Spring chama `POST /internal/v1/tips/resolve` uma vez por requisição, em TLS/rede interna, encaminhando o access token Keycloak original validado.
+3. Enviar `{ "user_id": <database_id do principal>, "user_role": "FARM_OWNER", "request_id": "<UUID>" }`; o Engine valida o JWT, audience e role e exige igualdade entre `user_id` e o claim assinado `database_id`. O client de emissão deve incluir a audience `ms-ouros-audience-engine`.
 4. Em `503` ou `source_status: STALE`, não converter falha/incompletude em lista vazia nem exibir como resolução; definir política de UI/retry explicitamente.
 5. Consultar textos de tips com uma query parametrizada em lote somente para `tip_ids` recebidos. Deduplicar/ordenar resultado. Não copiar texto de dica para o engine.
 6. Rever `GET /tips/{id}` com a mesma autorização; revisar compatibilidade `GET /tips` e `farms_tips` sem mudar sua semântica silenciosamente.
@@ -16,7 +16,7 @@ Resposta atual do Engine inclui `user_id`, `tip_ids`, `evaluated_at`, `snapshot_
 
 ## Ativações/notificações
 
-O serviço atual somente grava deltas bitmap/manifests no S3; não há endpoint/eventos por membro. Antes de conectar, acordar endpoint interno batch do Spring que:
+O MVP atual guarda somente snapshots de membership no Redis; não persiste deltas nem emite eventos por membro. Antes de conectar notificações, acordar endpoint batch do Spring e adicionar uma fonte durável de histórico/outbox que sobreviva ao reset do Redis. O endpoint deve:
 
 - valida role e vínculo sem aceitar payload não autenticado;
 - deduplica persistentemente por `event_id` antes de gravar notification;
@@ -24,6 +24,21 @@ O serviço atual somente grava deltas bitmap/manifests no S3; não há endpoint/
 - dispara FCM após commit/outbox, sem prometer exactly-once externo;
 - distingue ativação, resolução e revogação de acesso; não envia push para resolução/revogação por padrão.
 
-Dica ligada a mais de uma audiência usa OR. Uma saída em uma audiência só resolve dica se o usuário não estiver em nenhuma outra audiência ligada/habilitada. O cálculo precisa comparar os estados anterior/novo agregados, não encaminhar deltas individuais diretamente. Bootstrap e mudança de regra não fazem push em massa por padrão.
+Dica ligada a mais de uma audiência usa OR. Uma saída em uma audiência só resolve a dica se o usuário não estiver em nenhuma outra audiência ligada/habilitada. O cálculo precisa comparar estados anterior/novo agregados a partir de histórico durável; os snapshots Redis atuais não permitem reconstruir deltas perdidos após reset. Bootstrap e mudança de regra não fazem push em massa por padrão.
 
 `GET /tips/me`, filtro de `GET /tips/{id}`, alterações `event_id` em notifications, FCM, Android e migration de produção estão fora deste repo e não podem ser declarados concluídos.
+
+## API de gerenciamento de audiências
+
+Todas as rotas ficam sob `/internal/v1`. As rotas administrativas exigem access token válido do Keycloak com `realm_access.roles` contendo `admin`; tokens de proprietário de fazenda não podem gerenciar audiências.
+
+- `GET /users/{user_id}/audiences`: proprietário consulta apenas o próprio `database_id`; admin consulta qualquer ID positivo.
+- `GET /admin/audiences?search=...`, `GET /admin/audiences/{key}`, `POST /admin/audiences`, `PUT /admin/audiences/{key}` e `DELETE /admin/audiences/{key}` oferecem busca e CRUD das definições. A validação aceita apenas métricas já implementadas pelo Engine.
+- `GET /admin/tips?search=...&limit=...&offset=...` pesquisa IDs e textos de dicas existentes.
+- `PUT /admin/audiences/{key}/tips/{tip_id}` habilita o vínculo com uma dica; `DELETE` nessa rota remove o vínculo. A resolução só retorna a dica quando o snapshot da audiência contém o usuário.
+
+Alterar qualquer campo da definição além de `version` exige uma nova versão. A versão nova invalida o snapshot anterior, que o Engine recalcula na próxima consulta de participação. Ao excluir uma audiência, o Engine remove as chaves bitmap/manifest do Redis e as referências do PostgreSQL antes de remover a definição do MongoDB. Esses bancos não compartilham transação; uma falha durante a exclusão pode exigir reparo administrativo.
+
+O role de metadados do banco precisa receber os grants de `migrations/002_audience_admin_api.sql` antes de essas rotas pesquisarem dicas ou alterarem vínculos. As credenciais de produção também precisam de acesso de leitura/escrita com privilégio mínimo à coleção MongoDB de audiências.
+
+As dicas de produção inspecionadas não têm predicados de regra aprovados para todos os temas, e o SQL não expõe os campos necessários para várias delas. Não crie nem habilite audiências de produção apenas com base no texto da dica; valide a semântica de participação com o responsável pelo produto.

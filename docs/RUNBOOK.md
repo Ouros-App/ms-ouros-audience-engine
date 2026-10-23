@@ -12,9 +12,15 @@ make down
 
 Recriar fixtures limpas é destrutivo para dados locais: `docker compose down -v`, depois `make up`. Não executar esse comando em contexto que contenha dados a preservar.
 
+Mongo local usa `ouros_audience.audience_definitions` no volume `mongo_data`; o init script cria somente uma regra sintética para demo, nunca para produção. Definições de produção precisam ser inseridas por um principal administrativo autorizado. A API lê no startup; reinicie-a após alteração. CLI recarrega ao iniciar.
+
+Antes do deploy, disponibilize `MONGODB_URI` em `/ms-ouros-audience-engine` no Infisical, usando um usuário Mongo com leitura limitada à coleção; não reutilize a URI `atlasAdmin` que foi usada para provisionar o banco.
+
+Redis local executa RDB (`save 60 1`) e mantém AOF habilitado; os arquivos ficam no volume `redis_data`. RDB é periódico e pode omitir alterações recentes se a persistência AOF também falhar. Não remova o volume. Em produção, habilite RDB/backups no provedor em armazenamento durável e confirme retenção e política `noeviction`.
+
 ## Job de produção (contrato, não provisionado)
 
-Scheduler externo invoca `ouros-audience-engine run-once --publish` em processo separado a cada 30 minutos UTC. A CLI obtém um advisory lock de sessão no Postgres; processos concorrentes aguardam até 60 segundos e falham sem publicar se não conseguirem o lock. `--dry-run` não publica objetos/metadados, embora possa popular o cache read-through. A API administrativa não está habilitada.
+Scheduler externo invoca `ouros-audience-engine run-once --publish` em processo separado a cada 30 minutos UTC. A CLI obtém advisory lock de sessão no Postgres; processos concorrentes aguardam até 60 segundos. `--dry-run` não grava snapshots/metadados; `--publish` grava bitmap/manifest no Redis e atualiza o ponteiro. A API também reconstrói snapshots ausentes, sob o mesmo lock.
 
 Exemplo de crontab para uma instalação que já tenha secrets e serviços configurados:
 
@@ -26,13 +32,16 @@ O processo imprime JSON por audiência; erro é escrito em stderr e resulta em f
 
 ## Incidentes
 
-- `401` na resolução: confirmar bearer enviado pelo cliente Spring e secret sincronizado; nunca ativar rota anônima.
-- `503` da resolução: conferir readiness, banco de metadados, Redis, acesso S3/objeto e SHA-256. Não retornar tip vazia como workaround.
-- Job falha antes do CAS: ponteiro anterior continua publicado; objetos imutáveis que já foram enviados podem ficar órfãos. Não apagar objetos manualmente sem provar que não estão referenciados.
+- `401` na resolução: confirmar token vigente e correspondência de issuer, JWKS e audience `ms-ouros-audience-engine`; `403` indica role, escopo da fazenda ou `user_id` divergente.
+- `503` da resolução: conferir readiness, PostgreSQL de metadados/origem, conexão Redis e digest/manifest do snapshot.
+- Job falha antes do CAS: o ponteiro anterior continua publicado; chaves Redis imutáveis já gravadas podem ficar sem referência. Não as apague manualmente sem confirmar que não estão apontadas pelo PostgreSQL.
 - Erro CAS (`ConcurrentPublishError`): verificar jobs concorrentes; reexecutar depois que houver uma única execução. O processo não repete/recalcula automaticamente.
 - Resultado `UNCHANGED_UNKNOWN`: nenhuma fazenda teve avaliação válida; snapshot anterior foi preservado. Investigar freshness/dados; não forçar bitmap vazio.
 - `STALE` no contrato: watermark mais antigo que o limite da configuração; cliente deve distinguir isso de resolução.
+- Redis indisponível: a resolução falha fechada com `503`; não há fallback S3. Quando a conexão volta mas um snapshot está ausente, a primeira resolução o reconstrói.
 
-## Transições e entrega
+## Reset e rebuild Redis
 
-Transições são artefatos imutáveis no S3, mas não há dispatcher/replay de ponta a ponta nem receiver idempotente. O cursor `dispatched_through_version` é reservado e fica parado. Não avance manualmente e não configure FCM até completar ADR-0002 e integração Spring.
+API e scheduler serializam rebuilds pelo advisory lock PostgreSQL. Após reset do Redis, o rebuild usa a fonte PostgreSQL como bootstrap novo, sem bitmap anterior; fazendas UNKNOWN podem perder membership até nova medição válida. Se nenhuma fazenda tiver avaliação válida, o rebuild falha e a API continua retornando `503`, em vez de membership vazia.
+
+Não há histórico de transições nem dispatcher neste MVP. A coluna legada `dispatched_through_version` permanece sem uso e não deve ser avançada manualmente.

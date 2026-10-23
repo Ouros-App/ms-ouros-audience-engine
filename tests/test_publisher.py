@@ -1,14 +1,16 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
 
+import pytest
 from pyroaring import BitMap
 
 from ouros_audience_engine.adapters.bitmap_codec import BitmapCodec
+from ouros_audience_engine.adapters.redis_snapshot_store import SnapshotMissing
 from ouros_audience_engine.domain.audience import MeasurementPeriod
 from ouros_audience_engine.domain.config import WaterAudienceConfig
 from ouros_audience_engine.repositories.metadata_postgres import SnapshotRef
 from ouros_audience_engine.repositories.source_postgres import FarmData
-from ouros_audience_engine.services.audience_publisher import AudiencePublisher
+from ouros_audience_engine.services.audience_publisher import AudiencePublisher, NoValidEvaluation
 
 
 class MemorySource:
@@ -32,7 +34,7 @@ class MemoryMetadata:
     def ensure_audience(self, audience_key: str, rule_version: str) -> None:
         self.refs.setdefault(
             audience_key,
-            SnapshotRef(audience_key, 0, None, None, None, rule_version, None, None, 0),
+            SnapshotRef(audience_key, 0, None, None, None, rule_version, None, None),
         )
 
     def publish_snapshot(
@@ -59,39 +61,33 @@ class MemoryMetadata:
             rule_version,
             source_watermark,
             evaluated_at,
-            current.dispatched_through_version,
         )
         self.refs[audience_key] = updated
         return updated
 
 
 class MemoryStore:
-    def __init__(self) -> None:
+    def __init__(self, codec: BitmapCodec) -> None:
+        self.codec = codec
         self.objects: dict[str, bytes] = {}
 
     def snapshot_key(self, audience_key: str, version: int, digest: str) -> str:
         return f"{audience_key}/v{version}/bitmap-{digest}"
 
-    def transition_key(self, audience_key: str, version: int, kind: str, digest: str) -> str:
-        return f"{audience_key}/v{version}/{kind}-{digest}"
-
     def manifest_key(self, audience_key: str, version: int, digest: str) -> str:
         return f"{audience_key}/v{version}/manifest-{digest}"
 
-    def put_immutable(self, key: str, payload: bytes, content_type: str) -> None:
-        assert content_type in {"application/vnd.roaringbitmap", "application/json"}
+    def put_immutable(self, key: str, payload: bytes) -> None:
         existing = self.objects.setdefault(key, payload)
         assert existing == payload
 
-
-class MemoryReader:
-    def __init__(self, store: MemoryStore, codec: BitmapCodec) -> None:
-        self.store = store
-        self.codec = codec
-
     def get_bitmap(self, snapshot: SnapshotRef) -> BitMap:
-        assert snapshot.object_key is not None
-        return self.codec.decode(self.store.objects[snapshot.object_key])
+        if snapshot.object_key is None:
+            raise SnapshotMissing("snapshot key is missing")
+        try:
+            return self.codec.decode(self.objects[snapshot.object_key])
+        except KeyError as exc:
+            raise SnapshotMissing("snapshot bytes are missing") from exc
 
 
 def period(farm_id: int, month: int, amount: int, day: int = 28) -> MeasurementPeriod:
@@ -104,8 +100,8 @@ def period(farm_id: int, month: int, amount: int, day: int = 28) -> MeasurementP
     )
 
 
-def test_publisher_bootstraps_then_publishes_only_valid_entry_and_resolution() -> None:
-    config = WaterAudienceConfig(
+def audience_config() -> WaterAudienceConfig:
+    return WaterAudienceConfig(
         key="high_water_consumption",
         version="1",
         enabled=True,
@@ -122,6 +118,10 @@ def test_publisher_bootstraps_then_publishes_only_valid_entry_and_resolution() -
         unknown_policy="preserve_previous_membership",
         first_run_push=False,
     )
+
+
+def test_publisher_bootstraps_then_publishes_only_valid_entry_and_resolution() -> None:
+    config = audience_config()
     farms = {
         1: FarmData(
             1, {1, 2}, [period(1, 6, 100), period(1, 7, 100), period(1, 8, 100), period(1, 9, 130)]
@@ -132,15 +132,15 @@ def test_publisher_bootstraps_then_publishes_only_valid_entry_and_resolution() -
     }
     source = MemorySource(farms)
     metadata = MemoryMetadata()
-    store = MemoryStore()
     codec = BitmapCodec()
-    publisher = AudiencePublisher(source, metadata, store, codec, MemoryReader(store, codec))
+    store = MemoryStore(codec)
+    publisher = AudiencePublisher(source, metadata, store, codec)
 
     first = publisher.publish(config, evaluated_at=datetime(2026, 10, 1, tzinfo=UTC))
     assert (first.snapshot_version, first.member_count, first.added_count) == (1, 2, 0)
 
     unchanged = publisher.publish(config, evaluated_at=datetime(2026, 10, 2, tzinfo=UTC))
-    assert unchanged.status == "UNCHANGED_UNKNOWN"
+    assert unchanged.status == "UNCHANGED"
     assert unchanged.snapshot_version == 1
 
     farms[2].periods[-1] = period(2, 9, 180, day=30)
@@ -153,3 +153,76 @@ def test_publisher_bootstraps_then_publishes_only_valid_entry_and_resolution() -
         evaluated_at=datetime(2026, 11, 1, 12, tzinfo=UTC),
     )
     assert (resolved.snapshot_version, resolved.resolved_count, resolved.member_count) == (3, 1, 2)
+
+
+def test_publisher_rebuilds_snapshot_after_redis_reset() -> None:
+    config = audience_config()
+    farms = {
+        1: FarmData(
+            1, {1, 2}, [period(1, 6, 100), period(1, 7, 100), period(1, 8, 100), period(1, 9, 130)]
+        )
+    }
+    metadata = MemoryMetadata()
+    codec = BitmapCodec()
+    store = MemoryStore(codec)
+    publisher = AudiencePublisher(MemorySource(farms), metadata, store, codec)
+
+    initial = publisher.publish(config, evaluated_at=datetime(2026, 10, 1, tzinfo=UTC))
+    store.objects.clear()
+    recovered = publisher.publish(config, evaluated_at=datetime(2026, 10, 2, tzinfo=UTC))
+
+    ref = metadata.get_snapshot_ref(config.key)
+    assert initial.snapshot_version == recovered.snapshot_version == 1
+    assert recovered.status == "PUBLISHED"
+    assert list(store.get_bitmap(ref)) == [1, 2]
+
+
+def test_late_farm_measurement_is_not_blocked_by_another_farm_watermark() -> None:
+    config = audience_config()
+    farms = {
+        1: FarmData(
+            1,
+            {1},
+            [period(1, 7, 100), period(1, 8, 100), period(1, 9, 100), period(1, 10, 130, day=31)],
+        )
+    }
+    source = MemorySource(farms)
+    metadata = MemoryMetadata()
+    codec = BitmapCodec()
+    store = MemoryStore(codec)
+    publisher = AudiencePublisher(source, metadata, store, codec)
+
+    first = publisher.publish(config, evaluated_at=datetime(2026, 11, 1, tzinfo=UTC))
+    assert (first.snapshot_version, first.member_count) == (1, 1)
+
+    farms[2] = FarmData(
+        2,
+        {2},
+        [period(2, 7, 100), period(2, 8, 100), period(2, 9, 100), period(2, 10, 130, day=20)],
+    )
+    late_measurement = publisher.publish(config, evaluated_at=datetime(2026, 11, 2, tzinfo=UTC))
+
+    assert (late_measurement.snapshot_version, late_measurement.added_count) == (2, 1)
+    assert late_measurement.member_count == 2
+
+
+def test_publisher_refuses_empty_rebuild_when_all_farms_are_unknown() -> None:
+    config = audience_config()
+    farms = {
+        1: FarmData(
+            1, {1, 2}, [period(1, 6, 100), period(1, 7, 100), period(1, 8, 100), period(1, 9, 130)]
+        )
+    }
+    metadata = MemoryMetadata()
+    codec = BitmapCodec()
+    store = MemoryStore(codec)
+    publisher = AudiencePublisher(MemorySource(farms), metadata, store, codec)
+
+    publisher.publish(config, evaluated_at=datetime(2026, 10, 1, tzinfo=UTC))
+    store.objects.clear()
+    farms[1].periods.clear()
+
+    with pytest.raises(NoValidEvaluation):
+        publisher.publish(config, evaluated_at=datetime(2026, 10, 2, tzinfo=UTC))
+
+    assert metadata.get_snapshot_ref(config.key).snapshot_version == 1

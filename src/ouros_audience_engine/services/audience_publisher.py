@@ -7,11 +7,13 @@ from decimal import Decimal
 from pyroaring import BitMap
 
 from ouros_audience_engine.adapters.bitmap_codec import BitmapCodec
-from ouros_audience_engine.adapters.redis_cache import BitmapReader
-from ouros_audience_engine.adapters.s3_store import S3Store
+from ouros_audience_engine.adapters.redis_snapshot_store import (
+    RedisSnapshotStore,
+    SnapshotMissing,
+)
 from ouros_audience_engine.domain.audience import Evaluation
 from ouros_audience_engine.domain.config import WaterAudienceConfig
-from ouros_audience_engine.domain.manifest import SnapshotManifest, TransitionManifest
+from ouros_audience_engine.domain.manifest import SnapshotManifest
 from ouros_audience_engine.domain.rules import WaterConsumptionRule
 from ouros_audience_engine.repositories.metadata_postgres import (
     MetadataPostgresRepository,
@@ -45,15 +47,13 @@ class AudiencePublisher:
         self,
         source: SourcePostgresRepository,
         metadata: MetadataPostgresRepository,
-        s3_store: S3Store,
+        snapshot_store: RedisSnapshotStore,
         codec: BitmapCodec,
-        bitmap_reader: BitmapReader,
     ) -> None:
         self.source = source
         self.metadata = metadata
-        self.s3_store = s3_store
+        self.snapshot_store = snapshot_store
         self.codec = codec
-        self.bitmap_reader = bitmap_reader
 
     def publish(
         self,
@@ -71,10 +71,15 @@ class AudiencePublisher:
         try:
             ref = self.metadata.get_snapshot_ref(audience.key)
         except LookupError:
-            ref = SnapshotRef(audience.key, 0, None, None, None, audience.version, None, None, 0)
+            ref = SnapshotRef(audience.key, 0, None, None, None, audience.version, None, None)
         previous = BitMap()
+        snapshot_missing = False
         if ref.snapshot_version > 0:
-            previous = self.bitmap_reader.get_bitmap(ref)
+            try:
+                previous = self.snapshot_store.get_bitmap(ref)
+            except SnapshotMissing:
+                snapshot_missing = True
+                logger.info("audience snapshot missing from Redis; rebuilding from source")
 
         farm_inputs = self.source.load_water_audience_inputs(now)
         current_owner_ids = {
@@ -103,7 +108,6 @@ class AudiencePublisher:
             outcome = rule.evaluate(
                 farm.periods,
                 was_member=was_member,
-                previous_watermark=ref.source_watermark,
                 evaluated_at=now,
             )
             if outcome.evaluation is Evaluation.UNKNOWN:
@@ -124,7 +128,7 @@ class AudiencePublisher:
             )
 
         if valid_farms == 0:
-            if ref.snapshot_version > 0:
+            if ref.snapshot_version > 0 and not snapshot_missing:
                 return PublishResult(
                     audience.key,
                     "UNCHANGED_UNKNOWN",
@@ -149,102 +153,20 @@ class AudiencePublisher:
         payload = self.codec.encode(current_ids)
         digest = hashlib.sha256(payload).hexdigest()
         rule_changed = ref.snapshot_version > 0 and ref.rule_version != audience.version
-        unchanged = ref.snapshot_version > 0 and digest == ref.bitmap_sha256 and not rule_changed
-
-        if unchanged:
-            if dry_run:
-                return PublishResult(
-                    audience.key,
-                    "UNCHANGED",
-                    ref.snapshot_version,
-                    len(current_ids),
-                    unknown_farms,
-                    valid_farms,
-                    0,
-                    0,
-                    0,
-                    source_watermark,
-                )
-            self.metadata.publish_snapshot(
-                audience_key=audience.key,
-                expected_version=ref.snapshot_version,
-                new_version=ref.snapshot_version,
-                object_key=str(ref.object_key),
-                manifest_key=str(ref.manifest_key),
-                bitmap_sha256=str(ref.bitmap_sha256),
-                rule_version=audience.version,
-                source_watermark=source_watermark,
-                evaluated_at=now,
-            )
-            return PublishResult(
-                audience.key,
-                "UNCHANGED",
-                ref.snapshot_version,
-                len(current_ids),
-                unknown_farms,
-                valid_farms,
-                0,
-                0,
-                0,
-                source_watermark,
-            )
-
-        new_version = ref.snapshot_version + 1
-        bootstrap = ref.snapshot_version == 0 or rule_changed
-        added = self.codec.encode([] if bootstrap else added_ids)
-        resolved = self.codec.encode([] if bootstrap else resolved_ids)
-        revoked = self.codec.encode([] if bootstrap else revoked_ids)
-        artifacts: dict[str, tuple[str, bytes]] = {}
-        for kind, transition_payload in (
-            ("added", added),
-            ("removed_resolved", resolved),
-            ("removed_access_revoked", revoked),
-        ):
-            transition_digest = hashlib.sha256(transition_payload).hexdigest()
-            artifacts[kind] = (transition_digest, transition_payload)
-
-        object_key = self.s3_store.snapshot_key(audience.key, new_version, digest)
-        transition_keys = {
-            kind: self.s3_store.transition_key(
-                audience.key,
-                new_version,
-                "added" if kind == "added" else "removed",
-                transition_digest,
-            )
-            for kind, (transition_digest, _) in artifacts.items()
-        }
-        transition_hashes = {
-            kind: transition_digest for kind, (transition_digest, _) in artifacts.items()
-        }
-        # Removed transition objects share one S3 naming namespace; include the reason in key names.
-        transition_keys["removed_resolved"] = transition_keys["removed_resolved"].replace(
-            "transitions.removed-", "transitions.removed-resolved-"
+        unchanged = (
+            ref.snapshot_version > 0
+            and digest == ref.bitmap_sha256
+            and not rule_changed
+            and not snapshot_missing
         )
-        transition_keys["removed_access_revoked"] = transition_keys[
-            "removed_access_revoked"
-        ].replace("transitions.removed-", "transitions.removed-access-revoked-")
-        transition_manifest = TransitionManifest(
-            audience_key=audience.key,
-            snapshot_version=new_version,
-            previous_version=ref.snapshot_version,
-            added_key=transition_keys["added"],
-            resolved_key=transition_keys["removed_resolved"],
-            access_revoked_key=transition_keys["removed_access_revoked"],
-            added_sha256=transition_hashes["added"],
-            resolved_sha256=transition_hashes["removed_resolved"],
-            access_revoked_sha256=transition_hashes["removed_access_revoked"],
-            previous_object_key=ref.object_key,
-            previous_sha256=ref.bitmap_sha256,
-            member_id_space="farm_owner_user_id",
-            rule_version=audience.version,
-            evaluated_at=now,
-            source_watermark=source_watermark,
+        bootstrap = ref.snapshot_version == 0 or rule_changed or snapshot_missing
+        new_version = (
+            ref.snapshot_version
+            if ref.snapshot_version > 0 and digest == ref.bitmap_sha256 and not rule_changed
+            else ref.snapshot_version + 1
         )
-        transition_manifest_payload = transition_manifest.model_dump_json().encode("utf-8")
-        transition_manifest_digest = hashlib.sha256(transition_manifest_payload).hexdigest()
-        transition_index_key = self.s3_store.manifest_key(
-            audience.key, new_version, transition_manifest_digest
-        )
+
+        object_key = self.snapshot_store.snapshot_key(audience.key, new_version, digest)
         manifest = SnapshotManifest(
             audience_key=audience.key,
             snapshot_version=new_version,
@@ -257,41 +179,31 @@ class AudiencePublisher:
             sha256=digest,
             evaluated_at=now,
             source_watermark=source_watermark,
-            previous_version=ref.snapshot_version,
-            bootstrap=bootstrap,
-            transitions={**transition_keys, "manifest": transition_index_key},
-            transition_sha256=transition_hashes,
         )
         manifest_payload = manifest.model_dump_json().encode("utf-8")
         manifest_digest = hashlib.sha256(manifest_payload).hexdigest()
-        manifest_key = self.s3_store.manifest_key(audience.key, new_version, manifest_digest)
+        manifest_key = self.snapshot_store.manifest_key(audience.key, new_version, manifest_digest)
+        added_count = 0 if bootstrap else len(added_ids)
+        resolved_count = 0 if bootstrap else len(resolved_ids)
+        revoked_count = 0 if bootstrap else len(revoked_ids)
 
         if dry_run:
             return PublishResult(
                 audience.key,
-                "DRY_RUN",
+                "UNCHANGED" if unchanged else "DRY_RUN",
                 new_version,
                 len(current_ids),
                 unknown_farms,
                 valid_farms,
-                0 if bootstrap else len(added_ids),
-                0 if bootstrap else len(resolved_ids),
-                0 if bootstrap else len(revoked_ids),
+                0 if unchanged else added_count,
+                0 if unchanged else resolved_count,
+                0 if unchanged else revoked_count,
                 source_watermark,
             )
 
         self.metadata.ensure_audience(audience.key, audience.version)
-        self.s3_store.put_immutable(object_key, payload, "application/vnd.roaringbitmap")
-        for kind, (transition_digest, transition_payload) in artifacts.items():
-            self.s3_store.put_immutable(
-                transition_keys[kind], transition_payload, "application/vnd.roaringbitmap"
-            )
-            if hashlib.sha256(transition_payload).hexdigest() != transition_digest:
-                raise ValueError("transition checksum changed before upload")
-        self.s3_store.put_immutable(
-            transition_index_key, transition_manifest_payload, "application/json"
-        )
-        self.s3_store.put_immutable(manifest_key, manifest_payload, "application/json")
+        self.snapshot_store.put_immutable(object_key, payload)
+        self.snapshot_store.put_immutable(manifest_key, manifest_payload)
         self.metadata.publish_snapshot(
             audience_key=audience.key,
             expected_version=ref.snapshot_version,
@@ -305,13 +217,13 @@ class AudiencePublisher:
         )
         return PublishResult(
             audience.key,
-            "PUBLISHED",
+            "UNCHANGED" if unchanged else "PUBLISHED",
             new_version,
             len(current_ids),
             unknown_farms,
             valid_farms,
-            0 if bootstrap else len(added_ids),
-            0 if bootstrap else len(resolved_ids),
-            0 if bootstrap else len(revoked_ids),
+            added_count,
+            resolved_count,
+            revoked_count,
             source_watermark,
         )

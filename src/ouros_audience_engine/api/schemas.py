@@ -23,5 +23,18 @@ class ResolveResponse(BaseModel):
     source_status: Literal["CURRENT", "STALE"]
 
 
+class UserAudienceEntry(BaseModel):
+    key: str
+    version: str
+    tip_ids: list[int]
+    snapshot_version: int
+
+
+class UserAudiencesResponse(BaseModel):
+    user_id: int
+    audiences: list[UserAudienceEntry]
+    source_status: Literal["CURRENT", "STALE"]
+
+
 class HealthResponse(BaseModel):
     status: Literal["ok", "unavailable"]

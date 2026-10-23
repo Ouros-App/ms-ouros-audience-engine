@@ -32,9 +32,7 @@ def main() -> None:
     mode.add_argument(
         "--dry-run", action="store_true", help="evaluate without publishing snapshots"
     )
-    mode.add_argument(
-        "--publish", action="store_true", help="publish changed snapshots and transitions"
-    )
+    mode.add_argument("--publish", action="store_true", help="publish snapshots to Redis")
     run_once.add_argument(
         "--as-of",
         type=_parse_as_of,
@@ -58,8 +56,8 @@ def main() -> None:
             ]
         print(json.dumps([asdict(result) for result in results], default=_json_default, indent=2))
     finally:
+        runtime.mongo_client.close()
         runtime.redis_client.close()  # type: ignore[no-untyped-call]
-        runtime.s3_client.close()
 
 
 if __name__ == "__main__":

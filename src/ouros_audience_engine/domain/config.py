@@ -1,7 +1,5 @@
-from pathlib import Path
 from typing import Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -42,10 +40,3 @@ class AudienceConfig(BaseModel):
         if len(keys) != len(set(keys)):
             raise ValueError("audience keys must be unique")
         return self
-
-
-def load_audience_config(path: str | Path) -> AudienceConfig:
-    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(raw, dict) or "audiences" not in raw:
-        raise ValueError("audience configuration must contain an audiences list")
-    return AudienceConfig.model_validate(raw)

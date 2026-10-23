@@ -1,12 +1,12 @@
 # Ouros Audience Engine
 
-Serviço interno Python para calcular audiências determinísticas de `FARM_OWNER`. Os membros são serializados como Roaring Bitmaps imutáveis em S3; PostgreSQL guarda somente catálogo e referências; Redis funciona como cache read-through. O serviço não gera textos de dicas, não chama Firebase e não altera repositórios ou bancos externos.
+Serviço interno Python para calcular audiências determinísticas de `FARM_OWNER`. As definições das audiências são lidas do MongoDB; o SQL fornece os dados de origem, e os membros são serializados como Roaring Bitmaps versionados no Redis, que é o armazenamento principal. PostgreSQL guarda catálogo e referências. Se o Redis perder os snapshots, a primeira resolução os reconstrói da base de origem. O serviço não gera textos de dicas, não chama Firebase e não altera repositórios ou bancos externos.
 
 ## Estado e limites
 
-- Implementados neste repositório: FastAPI interna autenticada, leitura PostgreSQL read-only, regra configurável de consumo de água, publicação versionada S3, cache Redis, metadados/CAS, manifests de snapshot e transição, CLI single-run e fixtures locais.
+- Implementados neste repositório: API FastAPI interna com JWT Keycloak (RS256, issuer, audience e identidade/role FARM_OWNER), definições validadas no MongoDB, leitura PostgreSQL read-only, cálculo de membership, snapshots versionados no Redis e metadados/CAS.
 - A regra `high_water_consumption` é uma fixture de QA, não uma regra aprovada para produtores reais. Seu conjunto de dados e esquema são sintéticos; valide a semântica e o schema reais antes de configurar qualquer ambiente externo.
-- Não implementados aqui: integração `GET /tips/me` e autorização JWT no Spring, consumidor idempotente de eventos, persistência de notificações/FCM, mudanças no banco versionado, Android, scheduler gerenciado, retenção/GC S3 e infraestrutura de produção.
+- Não implementados aqui: integração `GET /tips/me` e autorização JWT no Spring, histórico/dispatcher de transições, persistência de notificações/FCM, mudanças no banco versionado, Android, scheduler gerenciado e retenção/GC dos snapshots Redis.
 - Não declarar o serviço pronto para produção. Não configure credenciais reais no Compose e não execute as SQL de demo em banco que não seja o stack local descartável.
 
 ## Requisitos
@@ -17,7 +17,7 @@ Serviço interno Python para calcular audiências determinísticas de `FARM_OWNE
 
 ## Execução e demonstração local
 
-O Compose inicializa Postgres, Redis, MinIO, schema/roles locais, fixtures e API. Os usuários técnicos têm privilégios separados: `audience_source` lê somente tabelas de origem; `audience_metadata` lê o catálogo/vínculos e atualiza apenas referências de audiência. As senhas são valores descartáveis de demonstração.
+O Compose inicializa Postgres, MongoDB, Redis, schema/roles locais, fixtures e API. MongoDB local recebe apenas uma regra de demo; Redis local grava RDB snapshots após pelo menos uma alteração em 60 segundos, mantém AOF habilitado e armazena ambos no volume Docker. Esses volumes preservam dados em reinicializações comuns, não substituem backup; fixtures não são produção. Os usuários técnicos PostgreSQL têm privilégios separados: `audience_source` lê somente tabelas de origem; `audience_metadata` lê o catálogo/vínculos e atualiza apenas referências de audiência.
 
 ```bash
 make up
@@ -25,7 +25,7 @@ make demo-dry-run
 make demo
 ```
 
-`make demo` publica o snapshot inicial de duas fazendas e três produtores: os usuários 1 e 2 ficam elegíveis; o usuário 3 não. Bootstrap não cria transição de ativação nem envia push. Rodar `make demo` outra vez sem nova medição não cria uma nova versão quando conteúdo e versão de regra permanecem iguais.
+`make demo` publica o snapshot inicial de duas fazendas e três produtores: os usuários 1 e 2 ficam elegíveis; o usuário 3 não. Bootstrap não grava histórico de transição nem envia push. Rodar `make demo` outra vez sem nova medição não cria uma nova versão quando conteúdo e versão de regra permanecem iguais.
 
 Para demonstrar entrada e resolução com dados locais:
 
@@ -35,35 +35,40 @@ make demo-activate  # repetição idempotente; não cria uma nova medição
 make demo-resolve
 ```
 
-`make demo-activate` registra medição sintética fechada em setembro de 2026; o usuário 3 entra. `make demo-resolve` insere medição sintética de outubro e executa com data QA `2026-11-01T12:00:00Z`; o usuário 3 sai por avaliação válida. A data de avaliação simulada é recusada em `ENVIRONMENT=production`. Estes comandos dependem da sequência: snapshot inicial, ativação, depois resolução.
+`make demo-activate` registra medição sintética fechada em setembro de 2026; o usuário 3 entra no membership. `make demo-resolve` insere medição sintética de outubro e executa com data QA `2026-11-01T12:00:00Z`; o usuário 3 sai por avaliação válida. Nenhuma transição é persistida ou enviada. A data de avaliação simulada é recusada em `ENVIRONMENT=production`. Estes comandos dependem da sequência: snapshot inicial, ativação, depois resolução.
 
-A API local fica em `http://localhost:8000`; MinIO Console em `http://localhost:9001` (`minioadmin` / `minioadmin`). Verifique prontidão e resolução:
+A API local fica em `http://localhost:8000`. Verifique prontidão e resolução:
 
 ```bash
 curl -fsS http://localhost:8000/health/live
 curl -fsS http://localhost:8000/health/ready
+```
+Antes de usar este exemplo, configure a audience `ms-ouros-audience-engine` no client emissor do Keycloak e use um token cujo claim `database_id` seja `1`, igual ao `user_id` enviado:
+
+```bash
 curl -fsS http://localhost:8000/internal/v1/tips/resolve \
-  -H 'Authorization: Bearer local-only-change-me' \
+  -H "Authorization: Bearer $KEYCLOAK_ACCESS_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"user_id":1,"user_role":"FARM_OWNER","request_id":"d97a8b61-9c9a-460e-a676-86ab2fa0ae53"}'
 ```
 
-Sem o token, a resolução retorna `401`. O endpoint retorna somente tip IDs, versão agregada e estado de frescor; os textos permanecem no catálogo de dicas. Falha ao carregar snapshot ou verificar checksum retorna `503`, nunca uma resposta vazia que pareça resolução.
+Sem bearer Keycloak válido, a resolução retorna `401`; tokens sem role `farm_owner` ou cuja identidade não corresponde ao `user_id` enviado retornam `403`. A resposta contém somente tip IDs, versão agregada e estado de frescor; os textos permanecem no catálogo. Snapshot Redis ausente aciona rebuild síncrono; falha de Redis, da origem ou da validação retorna `503`, nunca uma resposta vazia.
 
-Inspecione ponteiro e cursor sem consultar membros persistidos:
+Inspecione o ponteiro e as chaves Redis sem consultar IDs de membros:
 
 ```bash
 docker compose exec postgres psql -U audience_owner -d audience -c \
-  'SELECT audience_key, snapshot_version, s3_object_key, source_watermark, dispatched_through_version FROM audience_snapshot_refs'
+  'SELECT audience_key, snapshot_version, s3_object_key, s3_manifest_key, bitmap_sha256, source_watermark FROM audience_snapshot_refs'
+docker compose exec redis redis-cli --scan --pattern 'ouros:audience:bitmap:*'
 docker compose exec postgres psql -U audience_owner -d audience -c \
   'SELECT tip_id, audience_key, enabled FROM tip_audience_refs ORDER BY tip_id'
 ```
 
-Os objetos versionados e manifests podem ser inspecionados pelo Console MinIO. Para desligar os serviços preservando os volumes: `make down`. Para apagar todos os dados locais e recriar fixtures, use explicitamente `docker compose down -v`.
+`s3_object_key` e `s3_manifest_key` são nomes legados do schema; seus valores contêm chaves Redis. `docker compose down -v` apaga os volumes e os snapshots locais. Após um reset do Redis, a primeira resolução reconstrói a audiência como bootstrap novo; a histerese e a preservação de membership UNKNOWN não sobrevivem ao reset.
 
 ## Execução da CLI
 
-A CLI exige selecionar explicitamente um modo. `--dry-run` executa leitura e avaliação sem publicar snapshot/transições; pode preencher o cache read-through. `--publish` grava mudanças e é a forma de invocação por scheduler externo.
+`--dry-run` avalia sem gravar snapshots ou metadados; `--publish` publica o bitmap e o manifest no Redis e atualiza o ponteiro PostgreSQL. A CLI é a forma de invocação pelo scheduler externo.
 
 ```bash
 python -m venv .venv
@@ -85,13 +90,13 @@ make lint
 make typecheck
 ```
 
-O CI verifica pytest, Ruff e mypy. Para testar o stack de integração local, `make up` seguido dos comandos de demo exercita Postgres, Redis, MinIO, publicação, resolução e transições.
+O CI roda pytest com relatório de cobertura (sem limite mínimo), Ruff e mypy; valida o Compose e faz build da imagem. CodeQL roda como análise separada. Para testar o stack local, `make up` seguido dos comandos de demo exercita Postgres, Redis, publicação, resolução e rebuild após perda de snapshot.
 
 ## Configuração
 
-`config/audiences.example.yaml` é o modelo conservador com audiências desativadas. Compose seleciona `config/audiences.demo.yaml`, que habilita somente a fixture local. Produção deve fornecer sua própria configuração revisada. Todas as chaves de audiência, limiares, freshness e políticas são validadas; YAML não aceita SQL arbitrário.
+Cada documento em `ouros_audience.audience_definitions` define uma audiência; o modelo Pydantic valida os campos e `key` tem índice único. Mongo guarda regras, nunca usuários ou membership. A API carrega definições ao iniciar; depois de inserir/alterar uma definição, reinicie a API. O scheduler CLI recarrega as definições a cada execução. O banco de produção foi criado vazio: não promova a fixture QA como regra real.
 
-Variáveis disponíveis estão em `.env.example`. Valores e senhas ali são exemplos locais, não segredos reutilizáveis. Em produção use secret manager, TLS para PostgreSQL/Redis/S3/HTTP e bucket privado.
+Variáveis disponíveis estão em `.env.example`. Valores e senhas ali são exemplos locais, não segredos reutilizáveis. Em produção use secret manager e TLS para PostgreSQL, MongoDB, Redis e HTTP; configure Redis com `noeviction`, persistência RDB em armazenamento durável e backups/retention do provedor. RDB é periódico e, sozinho, pode perder alterações desde o último snapshot.
 
 ## Contratos e decisões
 
@@ -101,7 +106,7 @@ Variáveis disponíveis estão em `.env.example`. Valores e senhas ali são exem
 - [Demonstração local](docs/DEMO.md)
 - [Segurança](docs/SECURITY.md)
 - [Integração futura com Spring](docs/SPRING_INTEGRATION.md)
-- [ADR-0001 — formato, S3 e cache](docs/adr/0001-s3-roaring-redis.md)
+- [ADR-0001 — formato e armazenamento Redis](docs/adr/0001-s3-roaring-redis.md)
 - [ADR-0002 — transições e entrega](docs/adr/0002-notification-delivery.md)
 
-A migration `migrations/001_audience_metadata.sql` contém apenas metadados e deve ser revisada/aplicada pelo DBA no processo apropriado; a harness não a executou em banco externo. `docker/postgres/001_source_schema.sql` é fixture para Compose, não declaração do schema de produção. Integrações cross-repo requerem PRs e autorização próprios.
+A migration `migrations/001_audience_metadata.sql` contém apenas metadados e deve ser revisada/aplicada pelo DBA no processo apropriado; a harness não a executou em banco externo. Os nomes `s3_object_key` e `s3_manifest_key` foram mantidos para compatibilidade com o schema implantado, mas agora armazenam chaves Redis. `docker/postgres/001_source_schema.sql` é fixture para Compose, não declaração do schema de produção. Integrações cross-repo requerem PRs e autorização próprios.

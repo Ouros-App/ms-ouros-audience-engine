@@ -8,8 +8,6 @@ CREATE TABLE IF NOT EXISTS audience_snapshot_refs (
     source_watermark TIMESTAMPTZ,
     evaluated_at TIMESTAMPTZ,
     published_at TIMESTAMPTZ,
-    dispatched_through_version BIGINT NOT NULL DEFAULT 0,
-    CHECK (dispatched_through_version BETWEEN 0 AND snapshot_version),
     CHECK ((snapshot_version = 0 AND s3_object_key IS NULL
             AND s3_manifest_key IS NULL AND bitmap_sha256 IS NULL)
         OR (snapshot_version > 0 AND s3_object_key IS NOT NULL
@@ -24,6 +22,10 @@ CREATE TABLE IF NOT EXISTS tip_audience_refs (
 );
 
 COMMENT ON TABLE audience_snapshot_refs IS
-    'Current version pointers and dispatch cursor only; audience members live in versioned S3 bitmaps.';
+    'Current version pointers only; audience members live in versioned Redis bitmaps.';
+COMMENT ON COLUMN audience_snapshot_refs.s3_object_key IS
+    'Legacy S3-era column name; stores the versioned Redis bitmap key.';
+COMMENT ON COLUMN audience_snapshot_refs.s3_manifest_key IS
+    'Legacy S3-era column name; stores the Redis snapshot manifest key.';
 COMMENT ON TABLE tip_audience_refs IS
     'Reviewed links between existing tips and configured audiences; contains no member identities.';

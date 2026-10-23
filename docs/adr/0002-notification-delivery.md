@@ -1,6 +1,6 @@
-# ADR-0002: transições duráveis antes de qualquer entrega
+# ADR-0002: histórico de transições e entrega
 
-- Status: desenho parcial; dispatcher e integração de entrega bloqueados por contrato externo.
+- Status: histórico de transições removido do MVP; entrega continua bloqueada por contrato externo.
 - Data: 2026-10-19.
 
 ## Contexto
@@ -9,16 +9,16 @@ Um delta pode ser perdido se depender somente do processo job ou de cache Redis.
 
 ## Decisão implementada
 
-Ao publicar uma versão que muda, o publisher grava bitmaps imutáveis `added`, `removed-resolved`, `removed-access-revoked`, manifest de transição e manifest de snapshot antes do CAS do ponteiro PostgreSQL. Bootstrap e mudança de versão de regra são tratados como bootstrap e não contêm delta de push. O banco reserva um `dispatched_through_version` agregado por audiência.
+O MVP não persiste bitmaps de `added`, `removed-resolved` ou `removed-access-revoked`, nem manifests de transição. O publisher pode calcular contagens em memória para o resultado do job, mas elas não são replayáveis. A coluna PostgreSQL `dispatched_through_version` permanece sem uso no schema já implantado.
 
 ## Limite explícito
 
-Não existe dispatcher, expansão para evento por tip/user, event ID estável, receiver, política de retry/batch ou avanço de cursor neste repo. Deltas S3 não significam entrega durável. Não se deve chamar `advance_dispatch_cursor` nem afirmar que ativação foi notificada. Nenhuma chamada FCM é feita.
+Não existe dispatcher, expansão para evento por tip/user, event ID estável, receiver, política de retry/batch ou avanço de cursor neste repo. Não há artefatos de transição para replay e nenhuma chamada FCM é feita. Não se deve afirmar que ativação foi notificada.
 
 ## Próxima decisão necessária
 
-Antes de implementar entrega, obter contrato autorizado do Spring para ingestão batch de `TIP_ACTIVATED`/`TIP_RESOLVED`, dedupe durável por `event_id`, semântica OR agregada quando uma dica tem múltiplas audiências, limites de lote e confirmação após commit. O dispatcher deve percorrer versões sequenciais desde cursor, ler/validar manifests e bitmaps antigos/novos, comparar membership agregado por tip e somente então enviar o lote. Avançar cursor depois de confirmação durável; retries devem reproduzir os mesmos IDs de evento. FCM deve ocorrer after-commit/outbox no Spring. Até lá, flags e integração de envio permanecem ausentes/desligadas.
+Antes de implementar entrega, obter contrato autorizado do Spring para ingestão batch de `TIP_ACTIVATED`/`TIP_RESOLVED`, dedupe durável por `event_id`, semântica OR agregada quando uma dica tem múltiplas audiências, limites de lote e confirmação após commit. Como este MVP não guarda deltas, adicionar uma fonte durável de histórico/outbox independente dos snapshots Redis antes de prometer replay. Avançar cursor só depois de confirmação durável; retries devem reproduzir os mesmos IDs de evento. FCM deve ocorrer after-commit/outbox no Spring.
 
 ## Consequências
 
-A publicação mantém a capacidade de investigar deltas, mas não completa a aceitação de replay/entrega do handoff. A lacuna é bloqueadora para notificação e precisa de teste cross-service; não é mascarada por sink mock ou avanço do cursor local.
+O MVP não permite investigar ou reproduzir deltas entre snapshots e não completa a entrega de notificações. Não configure envio até completar um contrato idempotente com o Spring.
