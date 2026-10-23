@@ -11,7 +11,7 @@ Serviço interno Python para calcular audiências determinísticas de `FARM_OWNE
 
 ## Requisitos
 
-- Python 3.12+
+- Python 3.11+
 - Docker Engine com `docker compose`
 - `make` para os comandos de demonstração
 

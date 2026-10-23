@@ -7,7 +7,7 @@ name = "ouros-audience-engine"
 version = "0.1.0"
 description = "Deterministic audience snapshots for Ouros tips"
 readme = "README.md"
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.11,<3.15"
 dependencies = [
   "fastapi==0.115.6",
   "PyJWT[crypto]>=2.14,<3",
@@ -39,7 +39,7 @@ pythonpath = ["src"]
 testpaths = ["tests"]
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py311"
 line-length = 100
 
 [tool.ruff.lint]
@@ -49,7 +49,7 @@ select = ["E", "F", "I", "UP", "B"]
 "src/ouros_audience_engine/api/internal.py" = ["B008"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 strict = true
 mypy_path = "src"
 plugins = ["pydantic.mypy"]
