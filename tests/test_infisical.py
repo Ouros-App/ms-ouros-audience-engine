@@ -51,8 +51,79 @@ def test_rejects_unknown_infisical_environment() -> None:
         load_infisical_secrets()
 
 
+def test_production_requires_infisical_bootstrap() -> None:
+    with (
+        patch.dict(os.environ, {"ENVIRONMENT": "production"}, clear=True),
+        patch("ouros_audience_engine.infisical.load_dotenv", return_value=False),
+        pytest.raises(RuntimeError, match="INFISICAL_ENV='prod'"),
+    ):
+        load_infisical_secrets()
+
+
+def test_production_requires_the_audience_infisical_path() -> None:
+    bootstrap = {
+        "ENVIRONMENT": "production",
+        "INFISICAL_TOKEN": "token",
+        "INFISICAL_PROJECT_ID": "project",
+        "INFISICAL_ENV": "prod",
+        "INFISICAL_PATH": "/wrong-service",
+    }
+    with (
+        patch.dict(os.environ, bootstrap, clear=True),
+        patch("ouros_audience_engine.infisical.load_dotenv", return_value=False),
+        pytest.raises(RuntimeError, match="INFISICAL_PATH"),
+    ):
+        load_infisical_secrets()
+
+
+def test_production_requires_secrets_from_infisical_not_existing_environment() -> None:
+    bootstrap = {
+        "ENVIRONMENT": "production",
+        "INFISICAL_TOKEN": "token",
+        "INFISICAL_PROJECT_ID": "project",
+        "INFISICAL_ENV": "prod",
+        "INFISICAL_PATH": "/ms-ouros-audience-engine",
+        "MONGODB_URI": "mongodb+srv://old:password@mongo.example/db",
+        "SOURCE_DATABASE_URL": "postgresql://old:password@db/source?sslmode=verify-full",
+        "METADATA_DATABASE_URL": "postgresql://old:password@db/meta?sslmode=verify-full",
+        "REDIS_URL": "rediss://old:password@cache:6379/0",
+    }
+    response = SimpleNamespace(secrets=[])
+    with (
+        patch.dict(os.environ, bootstrap, clear=True),
+        patch("ouros_audience_engine.infisical.load_dotenv", return_value=False),
+        patch("ouros_audience_engine.infisical.InfisicalSDKClient") as client,
+        pytest.raises(RuntimeError, match="missing required production secrets: MONGODB_URI"),
+    ):
+        client.return_value.secrets.list_secrets.return_value = response
+        load_infisical_secrets()
+
+
+def test_infisical_cannot_override_deployment_environment() -> None:
+    bootstrap = {
+        "ENVIRONMENT": "production",
+        "INFISICAL_TOKEN": "token",
+        "INFISICAL_PROJECT_ID": "project",
+        "INFISICAL_ENV": "prod",
+        "INFISICAL_PATH": "/ms-ouros-audience-engine",
+    }
+    response = SimpleNamespace(
+        secrets=[SimpleNamespace(secretKey="ENVIRONMENT", secretValue="development")]
+    )
+    with patch.dict(os.environ, bootstrap, clear=True):
+        with (
+            patch("ouros_audience_engine.infisical.load_dotenv", return_value=False),
+            patch("ouros_audience_engine.infisical.InfisicalSDKClient") as client,
+            pytest.raises(RuntimeError, match="ENVIRONMENT deve ser configurado no deploy"),
+        ):
+            client.return_value.secrets.list_secrets.return_value = response
+            load_infisical_secrets()
+        assert os.environ["ENVIRONMENT"] == "production"
+
+
 def test_settings_use_mongodb_uri_loaded_from_infisical() -> None:
     bootstrap = {
+        "ENVIRONMENT": "production",
         "INFISICAL_TOKEN": "token",
         "INFISICAL_PROJECT_ID": "project",
         "INFISICAL_ENV": "prod",
@@ -63,7 +134,16 @@ def test_settings_use_mongodb_uri_loaded_from_infisical() -> None:
             SimpleNamespace(
                 secretKey="MONGODB_URI",
                 secretValue="mongodb+srv://audience:password@mongo.example/ouros_audience",
-            )
+            ),
+            SimpleNamespace(
+                secretKey="SOURCE_DATABASE_URL",
+                secretValue="postgresql://source:password@db/source?sslmode=verify-full",
+            ),
+            SimpleNamespace(
+                secretKey="METADATA_DATABASE_URL",
+                secretValue="postgresql://metadata:password@db/meta?sslmode=verify-full",
+            ),
+            SimpleNamespace(secretKey="REDIS_URL", secretValue="rediss://cache:6379/0"),
         ]
     )
 
