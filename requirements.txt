@@ -1,1 +1,8 @@
--e .[dev]
+fastapi==0.115.6
+PyJWT[crypto]>=2.14,<3
+pydantic-settings==2.7.0
+psycopg[binary]==3.2.10
+pyroaring==1.0.3
+pymongo[srv]==4.10.1
+redis==5.2.1
+uvicorn[standard]==0.34.0
