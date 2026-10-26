@@ -4,6 +4,8 @@ from urllib.parse import parse_qs, urlparse
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from ouros_audience_engine.infisical import load_infisical_secrets
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
@@ -66,4 +68,5 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
+    load_infisical_secrets()
     return Settings()

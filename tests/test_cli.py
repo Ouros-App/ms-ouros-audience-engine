@@ -3,7 +3,7 @@ import sys
 from contextlib import nullcontext
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -40,7 +40,7 @@ def test_run_once_continues_after_audience_failure_and_returns_nonzero(
         mongo_client=mongo_client,
         redis_client=redis_client,
     )
-    monkeypatch.setattr(cli, "Settings", lambda: SimpleNamespace(environment="development"))
+    monkeypatch.setattr(cli, "get_settings", lambda: SimpleNamespace(environment="development"))
     monkeypatch.setattr(cli, "build_runtime", lambda _settings: runtime)
     monkeypatch.setattr(sys, "argv", ["ouros-audience-engine", "run-once", "--dry-run"])
 
@@ -76,3 +76,29 @@ def test_run_once_continues_after_audience_failure_and_returns_nonzero(
     assert "password=secret" not in captured.err
     mongo_client.close.assert_called_once_with()
     redis_client.close.assert_called_once_with()
+
+
+def test_run_once_requires_production_infisical_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cli.get_settings.cache_clear()
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    for name in (
+        "INFISICAL_TOKEN",
+        "INFISICAL_PROJECT_ID",
+        "INFISICAL_ENV",
+        "INFISICAL_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(sys, "argv", ["ouros-audience-engine", "run-once", "--publish"])
+    build_runtime = Mock()
+    monkeypatch.setattr(cli, "build_runtime", build_runtime)
+
+    with (
+        patch("ouros_audience_engine.infisical.load_dotenv", return_value=False),
+        pytest.raises(RuntimeError, match="INFISICAL_ENV='prod'"),
+    ):
+        cli.main()
+
+    build_runtime.assert_not_called()
+    cli.get_settings.cache_clear()

@@ -5,7 +5,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 
 from ouros_audience_engine.runtime import build_runtime
-from ouros_audience_engine.settings import Settings
+from ouros_audience_engine.settings import get_settings
 
 
 def _parse_as_of(value: str) -> datetime:
@@ -39,7 +39,7 @@ def main() -> None:
         help="evaluation time (ISO-8601 with offset); non-production only",
     )
     args = parser.parse_args()
-    settings = Settings()
+    settings = get_settings()
     if args.as_of is not None and settings.environment.lower() == "production":
         parser.error("--as-of is disabled in production")
 
