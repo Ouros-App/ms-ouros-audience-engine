@@ -14,7 +14,7 @@ O loader rejeita documentos inválidos ou com campos extras; falha de validaçã
 
 ## Regras das 32 dicas e observações POC
 
-`default_tip_audiences()` contém 32 regras candidatas associadas aos IDs atuais de `public.tips`. `seed-tip-audiences` cria regras e vínculos dessas dicas desabilitados e, separadamente, cria/habilita `daily_hydrometer_audit` para a dica 121. É idempotente e recusa sobrescrever definições diferentes; não publica snapshots.
+`default_tip_audiences()` contém 32 regras candidatas associadas aos IDs atuais de `public.tips`. `seed-tip-audiences` cria regras e vínculos dessas dicas desabilitados e, separadamente, cria/habilita `daily_hydrometer_audit` para a dica 121. É idempotente, reconcilia o estado `enabled` dos vínculos e recusa sobrescrever definições diferentes ou vínculos de dicas diferentes; não publica snapshots.
 
 Um `TipAudienceConfig` tem `tip_id`, janela de freshness e `any_of`: cada ramo é AND de comparações; os ramos são OR. Comparações numéricas e booleanas são finitas e estritamente tipadas. Os campos definidos pela regra são o contrato exato de `signals`.
 

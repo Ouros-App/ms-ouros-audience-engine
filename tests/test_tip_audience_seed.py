@@ -68,6 +68,23 @@ def test_seed_creates_disabled_observation_rules_and_one_enabled_meter_audience(
     )
 
 
+def test_seed_repairs_drifted_tip_link_enabled_states() -> None:
+    definitions = MemoryDefinitions()
+    metadata = MemoryMetadata()
+    seed_tip_audiences(definitions, metadata)
+
+    enabled_item = daily_water_meter_audience()
+    disabled_item = default_tip_audiences()[0]
+    metadata.links[enabled_item.key] = [TipAudienceLink(enabled_item.tip_id, False)]
+    metadata.links[disabled_item.key] = [TipAudienceLink(disabled_item.tip_id, True)]
+
+    result = seed_tip_audiences(definitions, metadata)
+
+    assert result.linked_count == 2
+    assert metadata.links[enabled_item.key] == [TipAudienceLink(enabled_item.tip_id, True)]
+    assert metadata.links[disabled_item.key] == [TipAudienceLink(disabled_item.tip_id, False)]
+
+
 def test_seed_refuses_to_overwrite_any_existing_custom_rule() -> None:
     definitions = MemoryDefinitions()
     metadata = MemoryMetadata()

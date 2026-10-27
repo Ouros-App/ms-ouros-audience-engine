@@ -47,7 +47,8 @@ def seed_tip_audiences(
         existing = current_definitions[item.key]
         if existing is not None and existing != item:
             raise TipAudienceSeedError(f"refusing to overwrite existing audience: {item.key}")
-        if any(link.tip_id != item.tip_id for link in current_links.get(item.key, [])):
+        links = current_links.get(item.key, [])
+        if any(link.tip_id != item.tip_id for link in links):
             raise TipAudienceSeedError(f"audience has a mismatched tip link: {item.key}")
 
     created_count = 0
@@ -56,7 +57,8 @@ def seed_tip_audiences(
         if current_definitions[item.key] is None:
             definitions.create(item)
             created_count += 1
-        if not current_links.get(item.key):
+        existing_links = current_links.get(item.key, [])
+        if not existing_links or any(link.enabled != item.enabled for link in existing_links):
             if not metadata.link_tip(
                 item.key,
                 item.tip_id,
