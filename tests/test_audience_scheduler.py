@@ -1,12 +1,13 @@
 import asyncio
-from contextlib import nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager
 from threading import Event as ThreadEvent
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
 from fastapi.testclient import TestClient
 
-from ouros_audience_engine.domain.config import AudienceConfig
+from ouros_audience_engine.domain.config import AudienceConfig, AudienceDefinition
 from ouros_audience_engine.domain.tip_audience_catalog import (
     daily_water_meter_audience,
     default_tip_audiences,
@@ -20,16 +21,35 @@ def test_publish_cycle_reloads_mongo_and_publishes_only_enabled_definitions() ->
     enabled = daily_water_meter_audience()
     disabled = default_tip_audiences()[0]
     config = AudienceConfig(audiences=[enabled, disabled])
+    lock_active = False
+
+    @contextmanager
+    def publish_lock() -> Iterator[None]:
+        nonlocal lock_active
+        lock_active = True
+        try:
+            yield
+        finally:
+            lock_active = False
+
+    def load() -> AudienceConfig:
+        assert lock_active
+        return config
+
+    def publish(_audience: AudienceDefinition) -> SimpleNamespace:
+        assert lock_active
+        return SimpleNamespace(
+            audience_key=enabled.key,
+            status="PUBLISHED",
+            snapshot_version=1,
+            member_count=40,
+        )
+
     definitions = Mock()
-    definitions.load.return_value = config
-    lock = Mock(return_value=nullcontext())
+    definitions.load.side_effect = load
+    lock = Mock(side_effect=publish_lock)
     publisher = Mock()
-    publisher.publish.return_value = SimpleNamespace(
-        audience_key=enabled.key,
-        status="PUBLISHED",
-        snapshot_version=1,
-        member_count=40,
-    )
+    publisher.publish.side_effect = publish
     runtime = SimpleNamespace(
         api=SimpleNamespace(config=AudienceConfig(audiences=[]), definitions=definitions),
         metadata=SimpleNamespace(publish_job_lock=lock),

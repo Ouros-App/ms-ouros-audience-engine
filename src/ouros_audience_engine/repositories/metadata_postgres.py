@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from time import monotonic, sleep
-from typing import Any, cast
+from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
@@ -54,14 +54,22 @@ class MetadataPostgresRepository:
         self.timeout_seconds = timeout_seconds
 
     def _connect(self) -> psycopg.Connection[dict[str, Any]]:
-        return cast(
-            psycopg.Connection[dict[str, Any]],
-            psycopg.connect(
-                self.database_url,
-                connect_timeout=self.timeout_seconds,
-                row_factory=dict_row,
-            ),
+        connection = psycopg.connect(
+            self.database_url,
+            connect_timeout=self.timeout_seconds,
+            row_factory=dict_row,
         )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT set_config('statement_timeout', %s, false)",
+                    (f"{self.timeout_seconds}s",),
+                )
+            connection.commit()
+        except Exception:
+            connection.close()
+            raise
+        return connection
 
     @staticmethod
     def _snapshot(row: dict[str, Any]) -> SnapshotRef:

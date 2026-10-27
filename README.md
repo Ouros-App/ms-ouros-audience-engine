@@ -68,19 +68,19 @@ docker compose exec postgres psql -U audience_owner -d audience -c \
 
 ## Execução da CLI
 
-`--dry-run` avalia sem gravar snapshots ou metadados; `--publish` publica o bitmap e o manifest no Redis e atualiza o ponteiro PostgreSQL. A CLI é a forma de invocação pelo scheduler externo.
+`--dry-run` avalia sem gravar snapshots ou metadados; `--publish` publica o bitmap no Redis e atualiza o ponteiro PostgreSQL. `run-once` serve para execução manual; a publicação automática é iniciada pelo lifespan da API, imediatamente na inicialização e depois a cada 30 minutos, aguardando o fim de cada ciclo antes do próximo.
 
 ```bash
 python -m venv .venv
 . .venv/bin/activate
 pip install -e '.[dev]'
 cp .env.example .env
-ouros-audience-engine seed-tip-audiences  # somente no banco com os 32 IDs de dicas esperados; cria regras e vínculos desabilitados
+ouros-audience-engine seed-tip-audiences  # somente no banco com as 32 dicas esperadas; cria 32 regras desabilitadas e uma habilitada
 ouros-audience-engine run-once --dry-run
-ouros-audience-engine run-once --publish
+ouros-audience-engine run-once --publish  # publicação manual, fora da API
 ```
 
-A instalação local requer serviços disponíveis e URLs/credenciais em `.env`. Compose injeta sua própria configuração. Para simular períodos fechados em QA, a CLI aceita `--as-of 2026-11-01T12:00:00Z`; exige timestamp ISO-8601 com fuso e não é permitido em produção. A execução agendada deve chamar a CLI como processo separado, sem agendador embutido em workers ASGI. O contrato operacional inicial é `*/30 * * * *` UTC, configurado no scheduler do ambiente, com um único job por ambiente.
+A instalação local requer serviços disponíveis e URLs/credenciais em `.env`. Compose injeta sua própria configuração. Para simular períodos fechados em QA, a CLI aceita `--as-of 2026-11-01T12:00:00Z`; exige timestamp ISO-8601 com fuso e não é permitido em produção. Não configure um scheduler externo para a mesma API: cada ciclo publica uma vez por processo, e uma execução externa pode duplicar trabalho.
 
 ## Desenvolvimento
 

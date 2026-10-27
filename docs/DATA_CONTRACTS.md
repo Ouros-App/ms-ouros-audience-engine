@@ -10,7 +10,7 @@
 
 Cada documento de `ouros_audience.audience_definitions` representa um `WaterAudienceConfig` ou `TipAudienceConfig`; `_id` é gerado pelo Mongo e ignorado pelo loader. `key` é único. Regras tipadas definem as condições e nunca armazenam usuários ou resultados do filtro.
 
-O loader rejeita documentos inválidos ou com campos extras; falha de validação impede a inicialização em vez de aplicar defaults silenciosos. Mongo guarda apenas definições, nunca IDs de usuários ou resultados do filtro. A API carrega definições ao iniciar; alterações por CRUD administrativo atualizam somente o processo que atende à requisição. Outras instâncias/processos precisam reiniciar para refletir a mudança. Alterações diretas no Mongo exigem reiniciar todos os processos da API. `run-once` carrega definições frescas ao iniciar cada execução.
+O loader rejeita documentos inválidos ou com campos extras; falha de validação impede a inicialização em vez de aplicar defaults silenciosos. Mongo guarda apenas definições, nunca IDs de usuários ou resultados do filtro. A API carrega definições ao iniciar e o scheduler recarrega o Mongo a cada ciclo de 30 minutos. CRUD administrativo atualiza o processo que atende à chamada sob o mesmo lock da publicação; os demais processos e alterações diretas no Mongo são refletidos no ciclo seguinte, sem reinicialização. `run-once` carrega definições frescas ao iniciar cada execução.
 
 ## Regras das 32 dicas e observações POC
 
@@ -74,4 +74,4 @@ Os textos de dicas pertencem à integração Spring documentada em [SPRING_INTEG
 
 As rotas `/internal/v1/admin/...` exigem access token Keycloak válido com role `admin`. O CRUD em `/admin/audiences` cria, busca, lista, edita e exclui definições Mongo; `/admin/tips` busca dicas, `/admin/audiences/{key}/tips/{tip_id}` gerencia vínculos PostgreSQL, e `/admin/farms/{farm_id}/tips/{tip_id}/observation` substitui a medição atual de uma fazenda/dica. A resolução de tips recebe somente a identidade do usuário, nunca uma definição de audiência enviada pelo cliente.
 
-Após POST/PUT/DELETE de definição, o processo API que atendeu a chamada recarrega sua configuração. Em deployments com múltiplos workers ou réplicas, os demais processos permanecem com a configuração anterior até reiniciarem. Alterações feitas diretamente no Mongo não atualizam nenhum processo em execução. Cada execução `run-once` lê a configuração atual do Mongo.
+Após POST/PUT/DELETE de definição, o processo API que atendeu a chamada recarrega sua configuração sob o lock compartilhado com o scheduler. Os outros processos e alterações diretas no Mongo aparecem no próximo ciclo periódico, sem reinício. Cada execução `run-once` também lê a configuração atual do Mongo.

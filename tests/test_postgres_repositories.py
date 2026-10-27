@@ -75,6 +75,17 @@ def test_source_connection_enforces_read_only_and_statement_timeout(
     assert read_only == "on"
     assert statement_timeout == "7s"
 
+
+def test_metadata_connection_enforces_statement_timeout(database_url: str) -> None:
+    repository = MetadataPostgresRepository(database_url, timeout_seconds=7)
+
+    with repository._connect() as connection, connection.cursor() as cursor:
+        cursor.execute("SHOW statement_timeout")
+        statement_timeout = cursor.fetchone()["statement_timeout"]
+
+    assert statement_timeout == "7s"
+
+
 def test_metadata_repository_publishes_links_and_enforces_snapshot_cas(
     database_url: str,
 ) -> None:

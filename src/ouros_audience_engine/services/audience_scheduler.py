@@ -12,9 +12,9 @@ def publish_enabled_audiences(runtime: Runtime) -> None:
     if definitions is None:
         raise RuntimeError("Mongo audience definitions are unavailable")
 
-    config = definitions.load()
-    runtime.api.config = config
     with runtime.metadata.publish_job_lock():
+        config = definitions.load()
+        runtime.api.config = config
         for audience in config.audiences:
             if not audience.enabled:
                 continue

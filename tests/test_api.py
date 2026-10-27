@@ -1,4 +1,5 @@
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -37,6 +38,11 @@ _AUDIENCE = "ms-ouros-audience-engine"
 class FakeDefinitions:
     def __init__(self) -> None:
         self.items: dict[str, AudienceDefinition] = {}
+        self.lock_active: Callable[[], bool] | None = None
+
+    def _assert_write_locked(self) -> None:
+        if self.lock_active is not None and not self.lock_active():
+            raise AssertionError("audience definition mutation must hold the publish lock")
 
     def load(self) -> AudienceConfig:
         return AudienceConfig(audiences=list(self.items.values()))
@@ -55,22 +61,26 @@ class FakeDefinitions:
         return self.items.get(key)
 
     def create(self, definition: AudienceDefinition) -> None:
+        self._assert_write_locked()
         if definition.key in self.items:
             raise AudienceDefinitionConflict(definition.key)
         self.items[definition.key] = definition
 
     def replace(self, key: str, definition: AudienceDefinition) -> bool:
+        self._assert_write_locked()
         if key not in self.items:
             return False
         self.items[key] = definition
         return True
 
     def delete(self, key: str) -> bool:
+        self._assert_write_locked()
         return self.items.pop(key, None) is not None
 
 
 class FakeMetadata:
     def __init__(self) -> None:
+        self.publish_lock_active = False
         self.links: dict[str, dict[int, bool]] = {}
         self.tips = {10: "Hidrometro e leitura", 11: "Consumo de agua"}
         self.observations: dict[tuple[int, int], tuple[datetime, dict[str, object]]] = {}
@@ -100,8 +110,13 @@ class FakeMetadata:
     def check(self) -> None:
         pass
 
-    def publish_job_lock(self) -> AbstractContextManager[None]:
-        return nullcontext()
+    @contextmanager
+    def publish_job_lock(self) -> Iterator[None]:
+        self.publish_lock_active = True
+        try:
+            yield
+        finally:
+            self.publish_lock_active = False
 
     def list_tips(self, search: str | None, limit: int, offset: int) -> list[SimpleNamespace]:
         matches = [
@@ -389,6 +404,8 @@ def test_admin_can_crud_audiences_and_manage_tip_links(monkeypatch) -> None:
     definitions = FakeDefinitions()
     reader = FakeReader()
     test_client = client(reader, definitions=definitions)
+    metadata = test_client.app.state.api_services.metadata
+    definitions.lock_active = lambda: metadata.publish_lock_active
     admin_token = _token(
         user_id=None,
         account_type="admin",
