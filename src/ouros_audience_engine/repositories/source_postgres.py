@@ -22,6 +22,29 @@ class SourcePostgresRepository:
         self.database_url = database_url
         self.timeout_seconds = timeout_seconds
 
+    def load_farm_owners(self) -> dict[int, set[int]]:
+        farms: dict[int, set[int]] = {}
+        with (
+            psycopg.connect(
+                self.database_url,
+                connect_timeout=self.timeout_seconds,
+                options="-c default_transaction_read_only=on",
+                row_factory=dict_row,
+            ) as connection,
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                """
+                SELECT f.id AS farm_id, fo.id AS owner_id
+                FROM public.farms AS f
+                JOIN public.farm_owners AS fo ON fo.id_farm = f.id
+                ORDER BY f.id, fo.id
+                """
+            )
+            for row in cursor.fetchall():
+                farms.setdefault(int(row["farm_id"]), set()).add(int(row["owner_id"]))
+        return farms
+
     def load_water_audience_inputs(self, evaluated_at: datetime) -> dict[int, FarmData]:
         if evaluated_at.tzinfo is None:
             raise ValueError("evaluated_at must be timezone-aware")

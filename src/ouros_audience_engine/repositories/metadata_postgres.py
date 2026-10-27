@@ -7,6 +7,7 @@ from typing import Any, cast
 
 import psycopg
 from psycopg.rows import dict_row
+from psycopg.types.json import Jsonb
 
 
 class ConcurrentPublishError(RuntimeError):
@@ -25,7 +26,6 @@ class SnapshotRef:
     evaluated_at: datetime | None
 
 
-
 @dataclass(frozen=True, slots=True)
 class Tip:
     id: int
@@ -36,6 +36,15 @@ class Tip:
 class TipAudienceLink:
     tip_id: int
     enabled: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TipObservation:
+    farm_id: int
+    tip_id: int
+    observed_at: datetime
+    signals: dict[str, bool | int | float]
+
 
 class MetadataPostgresRepository:
     """Persists audience pointers and reviewed tip links; snapshot bytes live in Redis."""
@@ -165,9 +174,7 @@ class MetadataPostgresRepository:
             )
             return [Tip(id=int(row["id"]), tip=str(row["tip"])) for row in cursor.fetchall()]
 
-    def tip_links_for_audiences(
-        self, audience_keys: list[str]
-    ) -> dict[str, list[TipAudienceLink]]:
+    def tip_links_for_audiences(self, audience_keys: list[str]) -> dict[str, list[TipAudienceLink]]:
         if not audience_keys:
             return {}
         with self._connect() as connection, connection.cursor() as cursor:
@@ -187,7 +194,63 @@ class MetadataPostgresRepository:
                 )
         return result
 
-    def link_tip(self, audience_key: str, tip_id: int, rule_version: str) -> bool:
+    def upsert_tip_observation(
+        self,
+        farm_id: int,
+        tip_id: int,
+        observed_at: datetime,
+        signals: dict[str, bool | int | float],
+    ) -> bool:
+        if observed_at.tzinfo is None:
+            raise ValueError("observation timestamp must be timezone-aware")
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO public.farm_tip_observations
+                    (farm_id, tip_id, observed_at, signals)
+                SELECT farms.id, tips.id, %s, %s
+                FROM public.farms AS farms
+                JOIN public.tips AS tips ON tips.id = %s
+                WHERE farms.id = %s
+                ON CONFLICT (farm_id, tip_id) DO UPDATE
+                SET observed_at = EXCLUDED.observed_at,
+                    signals = EXCLUDED.signals,
+                    updated_at = statement_timestamp()
+                RETURNING farm_id
+                """,
+                (observed_at, Jsonb(signals), tip_id, farm_id),
+            )
+            return cursor.fetchone() is not None
+
+    def tip_observations(self, tip_id: int) -> dict[int, TipObservation]:
+        with self._connect() as connection, connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT farm_id, tip_id, observed_at, signals
+                FROM public.farm_tip_observations
+                WHERE tip_id = %s
+                ORDER BY farm_id
+                """,
+                (tip_id,),
+            )
+            return {
+                int(row["farm_id"]): TipObservation(
+                    farm_id=int(row["farm_id"]),
+                    tip_id=int(row["tip_id"]),
+                    observed_at=row["observed_at"],
+                    signals=dict(row["signals"]),
+                )
+                for row in cursor.fetchall()
+            }
+
+    def link_tip(
+        self,
+        audience_key: str,
+        tip_id: int,
+        rule_version: str,
+        *,
+        enabled: bool = True,
+    ) -> bool:
         with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute("SELECT 1 FROM public.tips WHERE id = %s", (tip_id,))
             if cursor.fetchone() is None:
@@ -203,10 +266,11 @@ class MetadataPostgresRepository:
             cursor.execute(
                 """
                 INSERT INTO tip_audience_refs (tip_id, audience_key, enabled)
-                VALUES (%s, %s, TRUE)
-                ON CONFLICT (tip_id, audience_key) DO UPDATE SET enabled = TRUE
+                VALUES (%s, %s, %s)
+                ON CONFLICT (tip_id, audience_key) DO UPDATE
+                SET enabled = EXCLUDED.enabled
                 """,
-                (tip_id, audience_key),
+                (tip_id, audience_key, enabled),
             )
         return True
 

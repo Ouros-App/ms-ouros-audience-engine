@@ -3,18 +3,24 @@
 ## Fluxo neste repositório
 
 1. API carrega definições de audiência do MongoDB ao iniciar; CRUD administrativo recarrega a configuração somente no processo que atende à chamada. Outros processos/replicas precisam reiniciar, e mudanças diretas no Mongo exigem reiniciar todos os processos. A CLI carrega definições frescas a cada execução. Ambos usam PostgreSQL de origem/metadados e Redis.
-2. `SourcePostgresRepository` usa `default_transaction_read_only=on`, consulta fazendas/proprietários e agrega leituras por mês fechado.
-3. `WaterConsumptionRule` compara o período mais recente com a mediana dos três meses consecutivos anteriores, aplica histerese/freshness e retorna ACTIVE, RESOLVED ou UNKNOWN.
-4. `AudiencePublisher` expande cada fazenda aos seus `farm_owners`, serializa `pyroaring.BitMap`, grava bitmap e manifest versionados no Redis e publica o ponteiro PostgreSQL via CAS.
+2. `SourcePostgresRepository` usa `default_transaction_read_only=on` e lê fazendas/proprietários e registros mensais de água. `MetadataPostgresRepository` lê observações tipadas por fazenda/dica.
+3. `WaterConsumptionRule` preserva o cálculo QA de água; `TipObservationRule` avalia comparações POC em OR de ramos AND, com freshness e resultado ternário ACTIVE, RESOLVED ou UNKNOWN.
+4. `AudiencePublisher` expande fazendas ativas aos seus `farm_owners`, serializa `pyroaring.BitMap`, grava bitmap e manifest versionados no Redis e publica o ponteiro PostgreSQL via CAS.
 5. FastAPI recebe `user_id` e `FARM_OWNER` apenas de cliente interno autenticado, carrega os vínculos de dicas e verifica membership no Redis. Se o snapshot estiver ausente, reconstrói de forma síncrona sob o mesmo advisory lock do scheduler. O texto da dica fica fora deste serviço.
 
 ## Persistência
 
-PostgreSQL guarda `audience_snapshot_refs` (ponteiro do snapshot, digest, versão da regra e timestamps) e `tip_audience_refs`; não armazena IDs de membros. MongoDB guarda apenas os documentos de regra em `ouros_audience.audience_definitions`; não contém usuários nem membership.
+PostgreSQL guarda `audience_snapshot_refs`, `tip_audience_refs` e o snapshot atual de sinais em `farm_tip_observations`; não armazena IDs de membros. MongoDB guarda apenas as definições em `ouros_audience.audience_definitions`; não contém usuários nem membership.
 
 Redis é o armazenamento principal dos snapshots. Bitmap e manifest usam chaves versionadas sem TTL. Um reset do Redis apaga os snapshots; a API os reconstrói usando a definição Mongo e a base PostgreSQL de origem como bootstrap novo.
 
 Bitmap e manifest são gravados antes do CAS dos metadados. Um CAS malsucedido pode deixar chaves Redis sem referência; histórico de transições e coleta de lixo não fazem parte do MVP.
+
+## Observações de regras POC
+
+O endpoint de observações é restrito a administradores Keycloak e substitui o conjunto atual de sinais por `(farm_id, tip_id)`. A API valida os campos/tipos exigidos pela definição Mongo; a tabela guarda somente a última observação, não um histórico. Valores ausentes, futuros ou expirados viram UNKNOWN; o publisher preserva membership anterior apenas para owners ainda vinculados, revoga os removidos mesmo se todas as fazendas estiverem UNKNOWN e publica watermark nulo quando qualquer fazenda com owners estiver UNKNOWN. Bootstrap sem avaliação válida falha fechado.
+
+O banco de produção consultado não tem a maioria das medições necessárias às 32 dicas. `seed-tip-audiences` cria as regras e vínculos desabilitados, mas não cria dados ou snapshots. Um coletor ou administrador precisa fornecer observações; os limiares são POC, não política agronômica aprovada.
 
 ## Identidade e regra fixture
 
@@ -24,7 +30,7 @@ Bitmap e manifest são gravados antes do CAS dos metadados. Um CAS malsucedido p
 
 ## Processos e limites externos
 
-A API não agenda jobs. O scheduler externo executa `ouros-audience-engine run-once --publish` a cada 30 minutos UTC. Rebuilds disparados pela API usam o mesmo advisory lock PostgreSQL e verificam o Redis novamente após adquiri-lo.
+O scheduler externo executa `ouros-audience-engine run-once --publish` a cada 30 minutos UTC. O catálogo de 32 dicas é criado separadamente por `ouros-audience-engine seed-tip-audiences`; esse comando não publica snapshots. Rebuilds disparados pela API usam o mesmo advisory lock PostgreSQL e verificam o Redis novamente após adquiri-lo.
 
 Histórico de transições, replay de eventos e entrega via FCM ficam fora deste MVP. A saída do job pode informar deltas em memória, mas nenhum artefato de transição é armazenado; a coluna legada `dispatched_through_version` não é usada.
 

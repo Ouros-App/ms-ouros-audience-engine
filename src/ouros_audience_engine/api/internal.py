@@ -13,6 +13,7 @@ from ouros_audience_engine.adapters.redis_snapshot_store import (
 from ouros_audience_engine.api.schemas import (
     ResolveRequest,
     ResolveResponse,
+    TipObservationWriteRequest,
     UserAudienceEntry,
     UserAudiencesResponse,
 )
@@ -22,7 +23,11 @@ from ouros_audience_engine.api.security import (
     require_farm_owner_or_admin,
     require_farm_owner_token,
 )
-from ouros_audience_engine.domain.config import AudienceConfig, WaterAudienceConfig
+from ouros_audience_engine.domain.config import (
+    AudienceConfig,
+    AudienceDefinition,
+    TipAudienceConfig,
+)
 from ouros_audience_engine.repositories.audience_definitions_mongo import (
     AudienceDefinitionConflict,
     AudienceDefinitionsMongoRepository,
@@ -42,7 +47,7 @@ class SnapshotStoreProtocol(Protocol):
 
 
 class PublisherProtocol(Protocol):
-    def publish(self, audience: WaterAudienceConfig) -> object: ...
+    def publish(self, audience: AudienceDefinition) -> object: ...
 
 
 @dataclass(slots=True)
@@ -62,12 +67,12 @@ def get_api_services(request: Request) -> ApiServices:
 
 
 def _load_audience_snapshots(
-    audiences: list[WaterAudienceConfig],
+    audiences: list[AudienceDefinition],
     services: ApiServices,
 ) -> dict[str, tuple[SnapshotRef, BitMap]]:
     for attempt in range(2):
         snapshots: dict[str, tuple[SnapshotRef, BitMap]] = {}
-        missing: list[WaterAudienceConfig] = []
+        missing: list[AudienceDefinition] = []
         for audience in audiences:
             try:
                 snapshot = services.metadata.get_snapshot_ref(audience.key)
@@ -117,7 +122,7 @@ def _require_definitions(services: ApiServices) -> AudienceDefinitionsMongoRepos
 
 
 def _admin_audience(
-    definition: WaterAudienceConfig,
+    definition: AudienceDefinition,
     links: list[TipAudienceLink],
 ) -> dict[str, object]:
     return {
@@ -164,7 +169,7 @@ def get_admin_audience(
 
 @router.post("/admin/audiences", status_code=status.HTTP_201_CREATED)
 def create_admin_audience(
-    definition: WaterAudienceConfig,
+    definition: AudienceDefinition,
     services: ApiServices = Depends(get_api_services),
     _admin: None = Depends(require_admin_token),
 ) -> dict[str, object]:
@@ -183,7 +188,7 @@ def create_admin_audience(
 @router.put("/admin/audiences/{key}")
 def replace_admin_audience(
     key: str,
-    definition: WaterAudienceConfig,
+    definition: AudienceDefinition,
     services: ApiServices = Depends(get_api_services),
     _admin: None = Depends(require_admin_token),
 ) -> dict[str, object]:
@@ -195,8 +200,7 @@ def replace_admin_audience(
         if current is None:
             raise HTTPException(status_code=404, detail="audience not found")
         if (
-            current.model_dump(exclude={"version"})
-            != definition.model_dump(exclude={"version"})
+            current.model_dump(exclude={"version"}) != definition.model_dump(exclude={"version"})
             and current.version == definition.version
         ):
             raise HTTPException(
@@ -255,6 +259,53 @@ def search_admin_tips(
 
 
 @router.put(
+    "/admin/farms/{farm_id}/tips/{tip_id}/observation",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def upsert_admin_tip_observation(
+    payload: TipObservationWriteRequest,
+    farm_id: int = Path(gt=0, le=2_147_483_647),
+    tip_id: int = Path(gt=0, le=2_147_483_647),
+    services: ApiServices = Depends(get_api_services),
+    _admin: None = Depends(require_admin_token),
+) -> None:
+    audience = next(
+        (
+            item
+            for item in services.config.audiences
+            if isinstance(item, TipAudienceConfig) and item.tip_id == tip_id
+        ),
+        None,
+    )
+    if audience is None:
+        raise HTTPException(status_code=404, detail="tip audience not found")
+    if set(payload.signals) != set(audience.required_signals):
+        raise HTTPException(
+            status_code=422,
+            detail="signals must exactly match the configured fields",
+        )
+    if any(
+        isinstance(payload.signals[field], bool) != expects_boolean
+        for field, expects_boolean in audience.required_signals.items()
+    ):
+        raise HTTPException(status_code=422, detail="signal value types do not match the rule")
+    try:
+        saved = services.metadata.upsert_tip_observation(
+            farm_id,
+            tip_id,
+            payload.observed_at,
+            payload.signals,
+        )
+        if not saved:
+            raise HTTPException(status_code=404, detail="farm or tip not found")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("tip observation write failed")
+        raise HTTPException(status_code=503, detail="tip observation unavailable") from exc
+
+
+@router.put(
     "/admin/audiences/{key}/tips/{tip_id}",
     status_code=status.HTTP_204_NO_CONTENT,
 )
@@ -269,7 +320,10 @@ def link_admin_tip(
         definition = repository.get(key)
         if definition is None:
             raise HTTPException(status_code=404, detail="audience not found")
-        if not services.metadata.link_tip(key, tip_id, definition.version):
+        if isinstance(definition, TipAudienceConfig) and definition.tip_id != tip_id:
+            raise HTTPException(status_code=409, detail="tip ID does not match audience rule")
+        enabled = definition.enabled if isinstance(definition, TipAudienceConfig) else True
+        if not services.metadata.link_tip(key, tip_id, definition.version, enabled=enabled):
             raise HTTPException(status_code=404, detail="tip not found")
     except HTTPException:
         raise

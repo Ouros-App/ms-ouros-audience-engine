@@ -4,8 +4,8 @@ Serviço interno Python para calcular audiências determinísticas de `FARM_OWNE
 
 ## Estado e limites
 
-- Implementados neste repositório: API FastAPI interna com JWT Keycloak (RS256, issuer, audience e identidade/role FARM_OWNER), definições validadas no MongoDB, leitura PostgreSQL read-only, cálculo de membership, snapshots versionados no Redis e metadados/CAS.
-- A regra `high_water_consumption` é uma fixture de QA, não uma regra aprovada para produtores reais. Seu conjunto de dados e esquema são sintéticos; valide a semântica e o schema reais antes de configurar qualquer ambiente externo.
+- Implementados neste repositório: API FastAPI interna com JWT Keycloak (RS256, issuer, audience e identidade/role FARM_OWNER), definições validadas no MongoDB, observações de fazenda/dica gravadas por admins no PostgreSQL, cálculo de membership, snapshots versionados no Redis e metadados/CAS.
+- `high_water_consumption` é uma fixture de QA. O catálogo de 32 dicas contém regras candidatas POC, desabilitadas por padrão; a maioria dos sinais não existe no schema de produção e precisa ser informada por operador/coletor. Os limiares não foram aprovados por agronomia.
 - Não implementados aqui: integração `GET /tips/me` e autorização JWT no Spring, histórico/dispatcher de transições, persistência de notificações/FCM, mudanças no banco versionado, Android, scheduler gerenciado e retenção/GC dos snapshots Redis.
 - Não declarar o serviço pronto para produção. Não configure credenciais reais no Compose e não execute as SQL de demo em banco que não seja o stack local descartável.
 
@@ -17,7 +17,7 @@ Serviço interno Python para calcular audiências determinísticas de `FARM_OWNE
 
 ## Execução e demonstração local
 
-O Compose inicializa Postgres, MongoDB, Redis, schema/roles locais, fixtures e API. MongoDB local recebe apenas uma regra de demo; Redis local grava RDB snapshots após pelo menos uma alteração em 60 segundos, mantém AOF habilitado e armazena ambos no volume Docker. Esses volumes preservam dados em reinicializações comuns, não substituem backup; fixtures não são produção. Os usuários técnicos PostgreSQL têm privilégios separados: `audience_source` lê somente tabelas de origem; `audience_metadata` lê o catálogo/vínculos e atualiza apenas referências de audiência.
+O Compose inicializa Postgres, MongoDB, Redis, schema/roles locais, fixtures e API. MongoDB local recebe apenas uma regra de demo; Redis local grava RDB snapshots após pelo menos uma alteração em 60 segundos, mantém AOF habilitado e armazena ambos no volume Docker. Esses volumes preservam dados em reinicializações comuns, não substituem backup; fixtures não são produção. `audience_source` lê tabelas de origem; `audience_metadata` lê catálogo/fazendas e lê/grava somente referências e observações de audiência.
 
 ```bash
 make up
@@ -75,6 +75,7 @@ python -m venv .venv
 . .venv/bin/activate
 pip install -e '.[dev]'
 cp .env.example .env
+ouros-audience-engine seed-tip-audiences  # somente no banco com os 32 IDs de dicas esperados; cria regras e vínculos desabilitados
 ouros-audience-engine run-once --dry-run
 ouros-audience-engine run-once --publish
 ```
@@ -94,7 +95,7 @@ O CI roda pytest com cobertura mínima de 80%, Ruff e mypy; valida o Compose e f
 
 ## Configuração
 
-Cada documento em `ouros_audience.audience_definitions` define uma audiência; o modelo Pydantic valida os campos e `key` tem índice único. Mongo guarda regras, nunca usuários ou membership. A API carrega definições ao iniciar; alterações via rotas administrativas atualizam apenas o processo que atendeu à requisição. Reinicie os demais processos/replicas após CRUD por API; alterações diretas no Mongo exigem reiniciar todos os processos da API. A CLI recarrega definições a cada execução. O banco de produção foi criado vazio: não promova a fixture QA como regra real.
+Mongo armazena definições tipadas, nunca usuários ou membership. `WaterAudienceConfig` é a regra de QA; `TipAudienceConfig` descreve condições booleanas e numéricas sobre sinais de uma dica. `seed-tip-audiences` valida os IDs, cria as 32 regras desabilitadas e não publica dados. A API Keycloak-admin recebe snapshots completos via `PUT /internal/v1/admin/farms/{farm_id}/tips/{tip_id}/observation`; ela não lê esses sinais do SQL de origem. Observações ausentes, vencidas ou futuras não implicam resolução. Cada execução da CLI carrega definições frescas do Mongo.
 
 Variáveis disponíveis estão em `.env.example`. Valores e senhas ali são exemplos locais, não segredos reutilizáveis. Em produção use secret manager e TLS para PostgreSQL, MongoDB, Redis e HTTP; configure Redis com `noeviction`, persistência RDB em armazenamento durável e backups/retention do provedor. RDB é periódico e, sozinho, pode perder alterações desde o último snapshot.
 
@@ -109,4 +110,4 @@ Variáveis disponíveis estão em `.env.example`. Valores e senhas ali são exem
 - [ADR-0001 — formato e armazenamento Redis](docs/adr/0001-s3-roaring-redis.md)
 - [ADR-0002 — transições e entrega](docs/adr/0002-notification-delivery.md)
 
-A migration `migrations/001_audience_metadata.sql` contém apenas metadados e deve ser revisada/aplicada pelo DBA no processo apropriado; a harness não a executou em banco externo. Os nomes `s3_object_key` e `s3_manifest_key` foram mantidos para compatibilidade com o schema implantado, mas agora armazenam chaves Redis. `docker/postgres/001_source_schema.sql` é fixture para Compose, não declaração do schema de produção. Integrações cross-repo requerem PRs e autorização próprios.
+Aplique `migrations/001_audience_metadata.sql`, `migrations/002_audience_admin_api.sql` e `migrations/003_tip_observations.sql` pelo processo aprovado pelo DBA; a harness não os executou em banco externo. A migration 003 concede ao `audience_metadata` somente SELECT em `farms` e SELECT/INSERT/UPDATE na tabela de observações. Os nomes `s3_object_key` e `s3_manifest_key` foram mantidos para compatibilidade com o schema implantado, mas agora armazenam chaves Redis. `docker/postgres/001_source_schema.sql` é fixture para Compose, não declaração do schema de produção. Integrações cross-repo requerem PRs e autorização próprios.

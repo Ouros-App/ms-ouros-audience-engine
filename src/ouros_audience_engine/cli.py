@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 
 from ouros_audience_engine.runtime import build_runtime
+from ouros_audience_engine.services.tip_audience_seed import seed_tip_audiences
 from ouros_audience_engine.settings import get_settings
 
 
@@ -38,19 +39,36 @@ def main() -> None:
         type=_parse_as_of,
         help="evaluation time (ISO-8601 with offset); non-production only",
     )
+    commands.add_parser(
+        "seed-tip-audiences",
+        help="create disabled POC rules for the 32 current tips",
+    )
     args = parser.parse_args()
     settings = get_settings()
-    if args.as_of is not None and settings.environment.lower() == "production":
+    if (
+        args.command == "run-once"
+        and args.as_of is not None
+        and settings.environment.lower() == "production"
+    ):
         parser.error("--as-of is disabled in production")
 
     runtime = build_runtime(settings)
     try:
+        if args.command == "seed-tip-audiences":
+            definitions = runtime.api.definitions
+            if definitions is None:
+                raise RuntimeError("Mongo audience definitions are unavailable")
+            with runtime.metadata.publish_job_lock():
+                seed_result = seed_tip_audiences(definitions, runtime.metadata)
+            print(json.dumps(asdict(seed_result), indent=2))
+            return
+
         failed = False
         results: list[dict[str, object]] = []
         with runtime.metadata.publish_job_lock():
             for audience in runtime.config.audiences:
                 try:
-                    result = runtime.publisher.publish(
+                    publish_result = runtime.publisher.publish(
                         audience,
                         evaluated_at=args.as_of,
                         dry_run=args.dry_run,
@@ -70,7 +88,7 @@ def main() -> None:
                         }
                     )
                 else:
-                    results.append(asdict(result))
+                    results.append(asdict(publish_result))
         print(json.dumps(results, default=_json_default, indent=2))
         if failed:
             raise SystemExit(1)

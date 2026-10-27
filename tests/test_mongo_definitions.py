@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from pymongo.errors import DuplicateKeyError
 
 from ouros_audience_engine.domain.config import WaterAudienceConfig
+from ouros_audience_engine.domain.tip_audience_catalog import default_tip_audiences
 from ouros_audience_engine.repositories.audience_definitions_mongo import (
     AudienceDefinitionConflict,
     AudienceDefinitionsMongoRepository,
@@ -52,9 +53,7 @@ class FakeCollection:
     def __init__(self, documents: list[dict[str, Any]]) -> None:
         self.documents = documents
 
-    def find(
-        self, query: dict[str, Any], projection: dict[str, bool]
-    ) -> FakeCursor:
+    def find(self, query: dict[str, Any], projection: dict[str, bool]) -> FakeCursor:
         expression = query.get("key", {}).get("$regex")
         options = query.get("key", {}).get("$options")
         documents = [
@@ -65,9 +64,7 @@ class FakeCollection:
         ]
         return FakeCursor(documents)
 
-    def find_one(
-        self, query: dict[str, Any], projection: dict[str, bool]
-    ) -> dict[str, Any] | None:
+    def find_one(self, query: dict[str, Any], projection: dict[str, bool]) -> dict[str, Any] | None:
         document = next(
             (document for document in self.documents if document["key"] == query["key"]),
             None,
@@ -139,3 +136,12 @@ def test_load_rejects_invalid_rule_documents() -> None:
 
     with pytest.raises(ValidationError, match="activation_pct must be greater"):
         AudienceDefinitionsMongoRepository(collection).load()
+
+
+def test_loader_accepts_tip_rule_documents() -> None:
+    definition = default_tip_audiences()[0]
+    repository = AudienceDefinitionsMongoRepository(FakeCollection([definition.model_dump()]))
+
+    config = repository.load()
+
+    assert config.audiences == [definition]

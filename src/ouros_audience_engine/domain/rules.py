@@ -1,7 +1,9 @@
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from ouros_audience_engine.domain.audience import Evaluation, MeasurementPeriod, RuleOutcome
+from ouros_audience_engine.domain.config import RuleClause, TipAudienceConfig
 
 
 def _month_key(period: MeasurementPeriod) -> tuple[int, int]:
@@ -89,6 +91,88 @@ class WaterConsumptionRule:
         else:
             result = Evaluation.ACTIVE if increase >= self.activation_pct else Evaluation.RESOLVED
         return RuleOutcome(result, watermark, increase)
+
+
+class TipObservationRule:
+    """Evaluates a tip's OR-of-AND conditions against one fresh farm observation."""
+
+    def __init__(self, config: TipAudienceConfig) -> None:
+        self.config = config
+
+    def evaluate(
+        self,
+        signals: Mapping[str, object],
+        *,
+        observed_at: datetime,
+        evaluated_at: datetime,
+    ) -> RuleOutcome:
+        if observed_at.tzinfo is None or evaluated_at.tzinfo is None:
+            raise ValueError("observation and evaluation timestamps must be timezone-aware")
+        watermark = observed_at.astimezone(UTC)
+        evaluated_utc = evaluated_at.astimezone(UTC)
+        if watermark > evaluated_utc:
+            return RuleOutcome(Evaluation.UNKNOWN, watermark, reason="FUTURE_OBSERVATION")
+        if evaluated_utc - watermark > timedelta(days=self.config.max_observation_age_days):
+            return RuleOutcome(Evaluation.UNKNOWN, watermark, reason="STALE_OBSERVATION")
+
+        has_unknown = False
+        for branch in self.config.any_of:
+            branch_values = [_evaluate_clause(clause, signals) for clause in branch.all]
+            if all(value is True for value in branch_values):
+                return RuleOutcome(Evaluation.ACTIVE, watermark, reason="RULE_MATCHED")
+            if not any(value is False for value in branch_values):
+                has_unknown = True
+        if has_unknown:
+            return RuleOutcome(Evaluation.UNKNOWN, watermark, reason="MISSING_OR_INVALID_SIGNAL")
+        return RuleOutcome(Evaluation.RESOLVED, watermark, reason="NO_RULE_MATCH")
+
+
+def _evaluate_clause(
+    clause: RuleClause,
+    signals: Mapping[str, object],
+) -> bool | None:
+    if clause.field not in signals:
+        return None
+    actual = signals[clause.field]
+    expected = clause.value
+    if isinstance(expected, bool):
+        if not isinstance(actual, bool):
+            return None
+        left: Decimal | bool = actual
+        right: Decimal | bool = expected
+    else:
+        if isinstance(actual, bool) or not isinstance(actual, Decimal | int | float):
+            return None
+        try:
+            left = Decimal(str(actual))
+            right = Decimal(str(expected))
+        except (InvalidOperation, ValueError):
+            return None
+        if not left.is_finite():
+            return None
+
+    if clause.operator == "eq":
+        return left == right
+    if clause.operator == "ne":
+        return left != right
+    if not isinstance(left, Decimal) or not isinstance(right, Decimal):
+        return None
+    if clause.operator == "lt":
+        return left < right
+    if clause.operator == "lte":
+        return left <= right
+    if clause.operator == "gt":
+        return left > right
+    if clause.operator == "gte":
+        return left >= right
+    if clause.operator in {"between", "outside"}:
+        if clause.upper is None:
+            return None
+        upper = Decimal(str(clause.upper))
+        if clause.operator == "between":
+            return right <= left <= upper
+        return left < right or left > upper
+    raise ValueError(f"unsupported rule operator: {clause.operator}")
 
 
 def _previous_month_key(key: tuple[int, int]) -> tuple[int, int]:
