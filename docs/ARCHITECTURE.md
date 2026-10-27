@@ -18,7 +18,7 @@ Bitmap e manifest são gravados antes do CAS dos metadados. Um CAS malsucedido p
 
 ## Observações de regras POC
 
-O endpoint de observações é restrito a administradores Keycloak e substitui o conjunto atual de sinais por `(farm_id, tip_id)`. A API valida os campos/tipos exigidos pela definição Mongo; a tabela guarda somente a última observação, não um histórico. Valores ausentes, futuros ou expirados viram UNKNOWN; membership anterior é preservado durante publicação normal, e bootstrap sem avaliação válida falha fechado.
+O endpoint de observações é restrito a administradores Keycloak e substitui o conjunto atual de sinais por `(farm_id, tip_id)`. A API valida os campos/tipos exigidos pela definição Mongo; a tabela guarda somente a última observação, não um histórico. Valores ausentes, futuros ou expirados viram UNKNOWN; o publisher preserva membership anterior apenas para owners ainda vinculados, revoga os removidos mesmo se todas as fazendas estiverem UNKNOWN e publica watermark nulo quando qualquer fazenda com owners estiver UNKNOWN. Bootstrap sem avaliação válida falha fechado.
 
 O banco de produção consultado não tem a maioria das medições necessárias às 32 dicas. `seed-tip-audiences` cria as regras e vínculos desabilitados, mas não cria dados ou snapshots. Um coletor ou administrador precisa fornecer observações; os limiares são POC, não política agronômica aprovada.
 

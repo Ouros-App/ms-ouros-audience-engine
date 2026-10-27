@@ -94,9 +94,6 @@ class AudiencePublisher:
             current_owner_ids = {
                 owner_id for farm in farm_inputs.values() for owner_id in farm.owner_ids
             }
-            source_watermarks.extend(
-                period.source_watermark for farm in farm_inputs.values() for period in farm.periods
-            )
             water_rule = WaterConsumptionRule(
                 activation_pct=Decimal(str(audience.activation_pct)),
                 resolution_pct=Decimal(str(audience.resolution_pct)),
@@ -119,6 +116,8 @@ class AudiencePublisher:
                         owner_id for owner_id in farm.owner_ids if owner_id in previous
                     )
                     continue
+                if outcome.source_watermark is not None:
+                    source_watermarks.append(outcome.source_watermark)
                 valid_farms += 1
                 if outcome.evaluation is Evaluation.ACTIVE:
                     current_members.update(farm.owner_ids)
@@ -135,9 +134,6 @@ class AudiencePublisher:
                 owner_id for owner_ids in owners_by_farm.values() for owner_id in owner_ids
             }
             observations = self.metadata.tip_observations(audience.tip_id)
-            source_watermarks.extend(
-                observation.observed_at for observation in observations.values()
-            )
             tip_rule = TipObservationRule(audience)
             for farm_id in sorted(owners_by_farm):
                 owner_ids = owners_by_farm[farm_id]
@@ -159,6 +155,8 @@ class AudiencePublisher:
                         owner_id for owner_id in owner_ids if owner_id in previous
                     )
                     continue
+                if outcome.source_watermark is not None:
+                    source_watermarks.append(outcome.source_watermark)
                 valid_farms += 1
                 if outcome.evaluation is Evaluation.ACTIVE:
                     current_members.update(owner_ids)
@@ -171,22 +169,13 @@ class AudiencePublisher:
                 )
 
         self.codec.encode(current_owner_ids)
-        source_watermark = max(source_watermarks) if source_watermarks else None
+        source_watermark = (
+            min(source_watermarks)
+            if valid_farms > 0 and unknown_farms == 0 and source_watermarks
+            else None
+        )
 
-        if valid_farms == 0:
-            if ref.snapshot_version > 0 and not snapshot_missing:
-                return PublishResult(
-                    audience.key,
-                    "UNCHANGED_UNKNOWN",
-                    ref.snapshot_version,
-                    len(previous),
-                    unknown_farms,
-                    0,
-                    0,
-                    0,
-                    0,
-                    ref.source_watermark,
-                )
+        if valid_farms == 0 and (ref.snapshot_version == 0 or snapshot_missing):
             raise NoValidEvaluation(
                 "no valid farm evaluations; refusing to publish an empty bootstrap"
             )
@@ -205,12 +194,19 @@ class AudiencePublisher:
             and not rule_changed
             and not snapshot_missing
         )
+        unchanged_unknown = unchanged and valid_farms == 0 and unknown_farms > 0
         bootstrap = ref.snapshot_version == 0 or rule_changed or snapshot_missing
         new_version = (
             ref.snapshot_version
             if ref.snapshot_version > 0 and digest == ref.bitmap_sha256 and not rule_changed
             else ref.snapshot_version + 1
         )
+        if unchanged_unknown:
+            status = "UNCHANGED_UNKNOWN"
+        elif unchanged:
+            status = "UNCHANGED"
+        else:
+            status = "DRY_RUN" if dry_run else "PUBLISHED"
 
         object_key = self.snapshot_store.snapshot_key(audience.key, new_version, digest)
         manifest = SnapshotManifest(
@@ -236,7 +232,7 @@ class AudiencePublisher:
         if dry_run:
             return PublishResult(
                 audience.key,
-                "UNCHANGED" if unchanged else "DRY_RUN",
+                status,
                 new_version,
                 len(current_ids),
                 unknown_farms,
@@ -263,7 +259,7 @@ class AudiencePublisher:
         )
         return PublishResult(
             audience.key,
-            "UNCHANGED" if unchanged else "PUBLISHED",
+            status,
             new_version,
             len(current_ids),
             unknown_farms,

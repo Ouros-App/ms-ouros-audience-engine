@@ -1,4 +1,4 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -261,7 +261,7 @@ def test_tip_publisher_preserves_stale_membership_then_resolves_valid_data() -> 
     metadata = MemoryMetadata()
     metadata.observations = {
         1: TipObservation(1, config.tip_id, fresh, active_signals),
-        2: TipObservation(2, config.tip_id, fresh, safe_signals),
+        2: TipObservation(2, config.tip_id, fresh + timedelta(hours=1), safe_signals),
     }
     codec = BitmapCodec()
     store = MemoryStore(codec)
@@ -270,6 +270,7 @@ def test_tip_publisher_preserves_stale_membership_then_resolves_valid_data() -> 
     first = publisher.publish(config, evaluated_at=evaluated_at)
     assert (first.member_count, first.evaluated_farms, first.unknown_farms) == (2, 2, 0)
     assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == [101, 102]
+    assert first.source_watermark == fresh
 
     metadata.observations[1] = TipObservation(
         1,
@@ -280,12 +281,47 @@ def test_tip_publisher_preserves_stale_membership_then_resolves_valid_data() -> 
     stale = publisher.publish(config, evaluated_at=evaluated_at)
     assert (stale.member_count, stale.unknown_farms) == (2, 1)
     assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == [101, 102]
+    assert stale.source_watermark is None
+    assert metadata.get_snapshot_ref(config.key).source_watermark is None
+    metadata.observations.pop(2)
+    all_unknown = publisher.publish(config, evaluated_at=evaluated_at)
+    assert (all_unknown.status, all_unknown.evaluated_farms) == ("UNCHANGED_UNKNOWN", 0)
+    assert all_unknown.source_watermark is None
+    assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == [101, 102]
 
     metadata.observations[1] = TipObservation(1, config.tip_id, fresh, safe_signals)
+    metadata.observations[2] = TipObservation(
+        2, config.tip_id, fresh + timedelta(hours=1), safe_signals
+    )
     resolved = publisher.publish(config, evaluated_at=evaluated_at)
     assert (resolved.member_count, resolved.resolved_count) == (0, 2)
     assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == []
 
+
+def test_tip_publisher_revokes_removed_owner_when_observation_is_unknown() -> None:
+    config = default_tip_audiences()[0].model_copy(update={"enabled": True})
+    evaluated_at = datetime(2026, 10, 1, 12, tzinfo=UTC)
+    fresh = datetime(2026, 10, 1, 10, tzinfo=UTC)
+    signals: dict[str, bool | int | float] = {
+        "nipple_setup_out_of_age_target": True,
+        "nipple_flow_ml_min": 75,
+    }
+    source = MemorySource({}, {1: {101, 102}})
+    metadata = MemoryMetadata()
+    metadata.observations = {1: TipObservation(1, config.tip_id, fresh, signals)}
+    codec = BitmapCodec()
+    store = MemoryStore(codec)
+    publisher = AudiencePublisher(source, metadata, store, codec)
+
+    publisher.publish(config, evaluated_at=evaluated_at)
+    source.owner_ids[1] = {102}
+    metadata.observations.clear()
+
+    result = publisher.publish(config, evaluated_at=evaluated_at)
+
+    assert result.access_revoked_count == 1
+    assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == [102]
+    assert metadata.get_snapshot_ref(config.key).source_watermark is None
 
 def test_tip_publisher_refuses_bootstrap_without_fresh_observations() -> None:
     config = default_tip_audiences()[0].model_copy(update={"enabled": True})

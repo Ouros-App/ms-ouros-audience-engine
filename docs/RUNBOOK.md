@@ -48,8 +48,8 @@ O processo imprime JSON por audiência; falhas individuais são incluídas como 
 - `503` da resolução: conferir readiness, PostgreSQL de metadados/origem, conexão Redis e digest/manifest do snapshot.
 - Job falha antes do CAS: o ponteiro anterior continua publicado; chaves Redis imutáveis já gravadas podem ficar sem referência. Não as apague manualmente sem confirmar que não estão apontadas pelo PostgreSQL.
 - Erro CAS (`ConcurrentPublishError`): verificar jobs concorrentes; reexecutar depois que houver uma única execução. O processo não repete/recalcula automaticamente.
-- Resultado `UNCHANGED_UNKNOWN`: nenhuma fazenda teve avaliação válida; snapshot anterior foi preservado. Investigar freshness/dados; não forçar bitmap vazio.
-- `STALE` no contrato: watermark mais antigo que o limite da configuração; cliente deve distinguir isso de resolução.
+- Resultado `UNCHANGED_UNKNOWN`: nenhuma fazenda teve avaliação válida; o bitmap anterior é preservado somente para owners ainda vinculados, proprietários removidos são revogados e o watermark fica `NULL`. Investigar freshness/dados; não forçar bitmap vazio.
+- `STALE` no contrato: watermark nulo ou mais antigo que o limite da configuração; cliente deve distinguir isso de resolução.
 - Redis indisponível: a resolução falha fechada com `503`; não há fallback S3. Quando a conexão volta mas um snapshot está ausente, a primeira resolução o reconstrói.
 
 ## Reset e rebuild Redis
