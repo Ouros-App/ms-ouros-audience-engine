@@ -30,17 +30,13 @@ Mantenha nesse path `MONGODB_URI`, `SOURCE_DATABASE_URL`, `METADATA_DATABASE_URL
 
 Redis local executa RDB (`save 60 1`) e mantém AOF habilitado; os arquivos ficam no volume `redis_data`. RDB é periódico e pode omitir alterações recentes se a persistência AOF também falhar. Não remova o volume. Em produção, habilite RDB/backups no provedor em armazenamento durável e confirme retenção e política `noeviction`.
 
-## Job de produção (contrato, não provisionado)
+## Publicação periódica em produção
 
-Scheduler externo invoca `ouros-audience-engine run-once --publish` em processo separado a cada 30 minutos UTC. A CLI obtém advisory lock de sessão no Postgres; processos concorrentes aguardam até 60 segundos. `--dry-run` não grava snapshots/metadados; `--publish` grava bitmap/manifest no Redis e atualiza o ponteiro. A API também reconstrói snapshots ausentes, sob o mesmo lock.
+O lifespan da API inicia uma publicação imediatamente e repete o ciclo 30 minutos após a conclusão do anterior. Cada ciclo recarrega as definições do Mongo, atualiza a configuração em memória e publica somente as audiências habilitadas, usando dados do PostgreSQL e salvando snapshots no Redis sob o advisory lock compartilhado. Após `seed-tip-audiences`, a definição é carregada e publicada no próximo ciclo; reinício não é necessário.
 
-Exemplo de crontab para uma instalação que já tenha secrets e serviços configurados:
+`ouros-audience-engine run-once --dry-run` verifica manualmente sem publicar; `run-once --publish` força uma execução manual. Ambos usam o mesmo lock. Falhas de leitura do Mongo ou do lock são registradas e tentadas novamente no ciclo seguinte; falhas por audiência são registradas sem impedir as demais. O scheduler roda em cada processo da API; o comando atual do Discloud inicia um processo, mas escalar workers/instâncias causará ciclos redundantes serializados pelo lock. Não há estado persistente de sucesso, métricas ou alertas.
 
-```cron
-*/30 * * * * /opt/ouros-audience-engine/venv/bin/ouros-audience-engine run-once --publish
-```
-
-O processo imprime JSON por audiência; falhas individuais são incluídas como `FAILED`, registradas em stderr sem a mensagem da exceção e não interrompem as audiências seguintes. Depois de processar todas, qualquer falha retorna exit code `1`. Supervisione exit code/log do scheduler. Não há cron instalado pelo Compose, job-health persistente, métricas Prometheus nem alertas neste repo.
+`/health/ready` verifica dependências da API, mas não confirma que o último ciclo do scheduler publicou snapshots com sucesso.
 
 ## Incidentes
 

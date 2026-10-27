@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from os import environ
 from uuid import uuid4
 
+import psycopg
 import pytest
 
 from ouros_audience_engine.repositories.metadata_postgres import (
@@ -32,12 +33,47 @@ def test_source_repository_reads_seeded_farms_and_monthly_water(database_url: st
 
 
 def test_source_repository_reads_latest_meter_timestamp_for_farms(database_url: str) -> None:
-    inputs = SourcePostgresRepository(database_url).load_daily_water_meter_audit_inputs()
+    with psycopg.connect(database_url) as connection:
+        row = connection.execute(
+            "INSERT INTO public.farms (name, area_property, region) "
+            "VALUES (%s, 1, 'test') RETURNING id",
+            (f"meter-test-{uuid4().hex}",),
+        ).fetchone()
+        assert row is not None
+        farm_id = int(row[0])
+        connection.execute(
+            """
+            INSERT INTO public.water_registries
+                (registration_date, start_hydrometer, end_hydrometer, id_farm)
+            VALUES (%s, 1, 2, %s), (%s, 2, 3, %s)
+            """,
+            (datetime(2026, 10, 1), farm_id, datetime(2026, 10, 2), farm_id),
+        )
 
-    assert inputs.latest_reading_by_farm[1] == datetime(2026, 9, 28, tzinfo=UTC)
-    assert inputs.latest_reading_by_farm[2] == datetime(2026, 9, 28, tzinfo=UTC)
-    assert inputs.source_watermark is not None
-    assert inputs.source_watermark.tzinfo is not None
+    try:
+        inputs = SourcePostgresRepository(database_url).load_daily_water_meter_audit_inputs()
+        assert inputs.latest_reading_by_farm[farm_id] == datetime(2026, 10, 2, tzinfo=UTC)
+        assert inputs.source_watermark is not None
+        assert inputs.source_watermark.tzinfo is not None
+    finally:
+        with psycopg.connect(database_url) as connection:
+            connection.execute("DELETE FROM public.water_registries WHERE id_farm = %s", (farm_id,))
+            connection.execute("DELETE FROM public.farms WHERE id = %s", (farm_id,))
+
+def test_source_connection_enforces_read_only_and_statement_timeout(
+    database_url: str,
+) -> None:
+    with (
+        SourcePostgresRepository(database_url, timeout_seconds=7)._connect() as connection,
+        connection.cursor() as cursor,
+    ):
+        cursor.execute("SHOW default_transaction_read_only")
+        read_only = cursor.fetchone()["default_transaction_read_only"]
+        cursor.execute("SHOW statement_timeout")
+        statement_timeout = cursor.fetchone()["statement_timeout"]
+
+    assert read_only == "on"
+    assert statement_timeout == "7s"
 
 def test_metadata_repository_publishes_links_and_enforces_snapshot_cas(
     database_url: str,

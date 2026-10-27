@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
@@ -28,17 +29,27 @@ class SourcePostgresRepository:
         self.database_url = database_url
         self.timeout_seconds = timeout_seconds
 
+    def _connect(self) -> psycopg.Connection[dict[str, Any]]:
+        connection = psycopg.connect(
+            self.database_url,
+            connect_timeout=self.timeout_seconds,
+            options="-c default_transaction_read_only=on",
+            row_factory=dict_row,
+        )
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT set_config('statement_timeout', %s, false)",
+                    (f"{self.timeout_seconds}s",),
+                )
+        except Exception:
+            connection.close()
+            raise
+        return connection
+
     def load_farm_owners(self) -> dict[int, set[int]]:
         farms: dict[int, set[int]] = {}
-        with (
-            psycopg.connect(
-                self.database_url,
-                connect_timeout=self.timeout_seconds,
-                options="-c default_transaction_read_only=on",
-                row_factory=dict_row,
-            ) as connection,
-            connection.cursor() as cursor,
-        ):
+        with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
                 SELECT f.id AS farm_id, fo.id AS owner_id
@@ -54,15 +65,7 @@ class SourcePostgresRepository:
     def load_daily_water_meter_audit_inputs(self) -> WaterMeterAuditInputs:
         latest_reading_by_farm: dict[int, datetime | None] = {}
         source_watermark: datetime | None = None
-        with (
-            psycopg.connect(
-                self.database_url,
-                connect_timeout=self.timeout_seconds,
-                options="-c default_transaction_read_only=on",
-                row_factory=dict_row,
-            ) as connection,
-            connection.cursor() as cursor,
-        ):
+        with self._connect() as connection, connection.cursor() as cursor:
             cursor.execute(
                 """
                 WITH source_state AS (
@@ -89,12 +92,7 @@ class SourcePostgresRepository:
         if evaluated_at.tzinfo is None:
             raise ValueError("evaluated_at must be timezone-aware")
         farms: dict[int, FarmData] = {}
-        connection = psycopg.connect(
-            self.database_url,
-            connect_timeout=self.timeout_seconds,
-            options="-c default_transaction_read_only=on",
-            row_factory=dict_row,
-        )
+        connection = self._connect()
         try:
             with connection.cursor() as cursor:
                 cursor.execute(

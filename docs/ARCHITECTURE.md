@@ -30,7 +30,7 @@ As 32 regras de observação POC e seus vínculos são criados desabilitados. `d
 
 ## Processos e limites externos
 
-Scheduler externo executa `ouros-audience-engine run-once --publish` a cada 30 minutos UTC. `seed-tip-audiences` cria as 32 regras de observação desabilitadas e `daily_hydrometer_audit`; nenhum seed publica snapshots. Rebuilds disparados pela API usam o mesmo advisory lock PostgreSQL e verificam o Redis novamente após adquiri-lo.
+O lifespan da API executa um ciclo de publicação imediatamente e depois a cada 30 minutos após a conclusão do anterior. Cada ciclo recarrega as definições do Mongo, atualiza a configuração em memória e publica apenas audiências habilitadas sob o advisory lock compartilhado no Postgres. `seed-tip-audiences` cria as 32 regras de observação desabilitadas e `daily_hydrometer_audit`, mas não publica snapshots; a nova definição é carregada no próximo ciclo sem reiniciar a API. A CLI `run-once` continua disponível para dry-run e execução manual.
 
 Histórico de transições, replay de eventos e entrega via FCM ficam fora deste MVP. A saída do job pode informar deltas em memória, mas nenhum artefato de transição é armazenado; a coluna legada `dispatched_through_version` não é usada.
 

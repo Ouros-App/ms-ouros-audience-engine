@@ -219,7 +219,7 @@ def client(
         keycloak_audience=_AUDIENCE,
         keycloak_jwks_url="https://issuer.example/certs",
     )
-    return TestClient(create_app(settings, runtime))
+    return TestClient(create_app(settings, runtime, enable_scheduler=False))
 
 
 def _token(
