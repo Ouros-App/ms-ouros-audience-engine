@@ -288,6 +288,11 @@ def test_tip_publisher_preserves_stale_membership_then_resolves_valid_data() -> 
     assert (all_unknown.status, all_unknown.evaluated_farms) == ("UNCHANGED_UNKNOWN", 0)
     assert all_unknown.source_watermark is None
     assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == [101, 102]
+    objects_before_retry = len(store.objects)
+    retry = publisher.publish(config, evaluated_at=evaluated_at + timedelta(minutes=1))
+    assert (retry.status, retry.source_watermark) == ("UNCHANGED_UNKNOWN", None)
+    assert len(store.objects) == objects_before_retry
+
 
     metadata.observations[1] = TipObservation(1, config.tip_id, fresh, safe_signals)
     metadata.observations[2] = TipObservation(
@@ -297,6 +302,43 @@ def test_tip_publisher_preserves_stale_membership_then_resolves_valid_data() -> 
     assert (resolved.member_count, resolved.resolved_count) == (0, 2)
     assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == []
 
+
+def test_tip_publisher_does_not_reuse_membership_after_rule_version_changes() -> None:
+    config = default_tip_audiences()[0].model_copy(update={"enabled": True})
+    evaluated_at = datetime(2026, 10, 1, 12, tzinfo=UTC)
+    fresh = datetime(2026, 10, 1, 10, tzinfo=UTC)
+    signals: dict[str, bool | int | float] = {
+        "nipple_setup_out_of_age_target": True,
+        "nipple_flow_ml_min": 75,
+    }
+    source = MemorySource({}, {1: {101, 102}, 2: {201}})
+    metadata = MemoryMetadata()
+    metadata.observations = {
+        1: TipObservation(1, config.tip_id, fresh, signals),
+        2: TipObservation(2, config.tip_id, fresh, signals),
+    }
+    codec = BitmapCodec()
+    store = MemoryStore(codec)
+    publisher = AudiencePublisher(source, metadata, store, codec)
+    publisher.publish(config, evaluated_at=evaluated_at)
+
+    new_rule = config.model_copy(update={"version": "2"})
+    metadata.observations.pop(2)
+    partial = publisher.publish(new_rule, evaluated_at=evaluated_at + timedelta(minutes=1))
+
+    assert partial.member_count == 2
+    assert partial.source_watermark is None
+    assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == [101, 102]
+    assert metadata.get_snapshot_ref(config.key).rule_version == "2"
+
+    next_rule = config.model_copy(update={"version": "3"})
+    metadata.observations.clear()
+    with pytest.raises(NoValidEvaluation):
+        publisher.publish(next_rule, evaluated_at=evaluated_at + timedelta(minutes=2))
+
+    current_ref = metadata.get_snapshot_ref(config.key)
+    assert (current_ref.snapshot_version, current_ref.rule_version) == (2, "2")
+    assert list(store.get_bitmap(current_ref)) == [101, 102]
 
 def test_tip_publisher_revokes_removed_owner_when_observation_is_unknown() -> None:
     config = default_tip_audiences()[0].model_copy(update={"enabled": True})

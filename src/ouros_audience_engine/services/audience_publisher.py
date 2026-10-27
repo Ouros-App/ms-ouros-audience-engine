@@ -75,6 +75,7 @@ class AudiencePublisher:
             ref = self.metadata.get_snapshot_ref(audience.key)
         except LookupError:
             ref = SnapshotRef(audience.key, 0, None, None, None, audience.version, None, None)
+        rule_changed = ref.snapshot_version > 0 and ref.rule_version != audience.version
         previous = BitMap()
         snapshot_missing = False
         if ref.snapshot_version > 0:
@@ -112,9 +113,10 @@ class AudiencePublisher:
                 )
                 if outcome.evaluation is Evaluation.UNKNOWN:
                     unknown_farms += 1
-                    current_members.update(
-                        owner_id for owner_id in farm.owner_ids if owner_id in previous
-                    )
+                    if not rule_changed:
+                        current_members.update(
+                            owner_id for owner_id in farm.owner_ids if owner_id in previous
+                        )
                     continue
                 if outcome.source_watermark is not None:
                     source_watermarks.append(outcome.source_watermark)
@@ -151,9 +153,10 @@ class AudiencePublisher:
                 )
                 if outcome.evaluation is Evaluation.UNKNOWN:
                     unknown_farms += 1
-                    current_members.update(
-                        owner_id for owner_id in owner_ids if owner_id in previous
-                    )
+                    if not rule_changed:
+                        current_members.update(
+                            owner_id for owner_id in owner_ids if owner_id in previous
+                        )
                     continue
                 if outcome.source_watermark is not None:
                     source_watermarks.append(outcome.source_watermark)
@@ -175,9 +178,9 @@ class AudiencePublisher:
             else None
         )
 
-        if valid_farms == 0 and (ref.snapshot_version == 0 or snapshot_missing):
+        if valid_farms == 0 and (ref.snapshot_version == 0 or snapshot_missing or rule_changed):
             raise NoValidEvaluation(
-                "no valid farm evaluations; refusing to publish an empty bootstrap"
+                "no valid farm evaluations; refusing to publish an empty or stale-rule snapshot"
             )
 
         current_ids = set(current_members)
@@ -187,7 +190,6 @@ class AudiencePublisher:
         added_ids = current_ids - previous_ids
         payload = self.codec.encode(current_ids)
         digest = hashlib.sha256(payload).hexdigest()
-        rule_changed = ref.snapshot_version > 0 and ref.rule_version != audience.version
         unchanged = (
             ref.snapshot_version > 0
             and digest == ref.bitmap_sha256
@@ -207,6 +209,19 @@ class AudiencePublisher:
             status = "UNCHANGED"
         else:
             status = "DRY_RUN" if dry_run else "PUBLISHED"
+        if unchanged_unknown and ref.source_watermark is None:
+            return PublishResult(
+                audience.key,
+                status,
+                ref.snapshot_version,
+                len(current_ids),
+                unknown_farms,
+                valid_farms,
+                0,
+                0,
+                0,
+                None,
+            )
 
         object_key = self.snapshot_store.snapshot_key(audience.key, new_version, digest)
         manifest = SnapshotManifest(
