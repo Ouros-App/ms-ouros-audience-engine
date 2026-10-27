@@ -8,14 +8,23 @@ from ouros_audience_engine.adapters.bitmap_codec import BitmapCodec
 from ouros_audience_engine.adapters.redis_snapshot_store import SnapshotMissing
 from ouros_audience_engine.domain.audience import MeasurementPeriod
 from ouros_audience_engine.domain.config import WaterAudienceConfig
-from ouros_audience_engine.repositories.metadata_postgres import SnapshotRef
+from ouros_audience_engine.domain.tip_audience_catalog import default_tip_audiences
+from ouros_audience_engine.repositories.metadata_postgres import SnapshotRef, TipObservation
 from ouros_audience_engine.repositories.source_postgres import FarmData
 from ouros_audience_engine.services.audience_publisher import AudiencePublisher, NoValidEvaluation
 
 
 class MemorySource:
-    def __init__(self, farms: dict[int, FarmData]) -> None:
+    def __init__(
+        self,
+        farms: dict[int, FarmData],
+        owner_ids: dict[int, set[int]] | None = None,
+    ) -> None:
         self.farms = farms
+        self.owner_ids = owner_ids or {farm_id: farm.owner_ids for farm_id, farm in farms.items()}
+
+    def load_farm_owners(self) -> dict[int, set[int]]:
+        return self.owner_ids
 
     def load_water_audience_inputs(self, evaluated_at: datetime) -> dict[int, FarmData]:
         return self.farms
@@ -24,12 +33,20 @@ class MemorySource:
 class MemoryMetadata:
     def __init__(self) -> None:
         self.refs: dict[str, SnapshotRef] = {}
+        self.observations: dict[int, TipObservation] = {}
 
     def get_snapshot_ref(self, audience_key: str) -> SnapshotRef:
         try:
             return self.refs[audience_key]
         except KeyError as exc:
             raise LookupError(audience_key) from exc
+
+    def tip_observations(self, tip_id: int) -> dict[int, TipObservation]:
+        return {
+            farm_id: observation
+            for farm_id, observation in self.observations.items()
+            if observation.tip_id == tip_id
+        }
 
     def ensure_audience(self, audience_key: str, rule_version: str) -> None:
         self.refs.setdefault(
@@ -226,3 +243,62 @@ def test_publisher_refuses_empty_rebuild_when_all_farms_are_unknown() -> None:
         publisher.publish(config, evaluated_at=datetime(2026, 10, 2, tzinfo=UTC))
 
     assert metadata.get_snapshot_ref(config.key).snapshot_version == 1
+
+
+def test_tip_publisher_preserves_stale_membership_then_resolves_valid_data() -> None:
+    config = default_tip_audiences()[0].model_copy(update={"enabled": True})
+    evaluated_at = datetime(2026, 10, 1, 12, tzinfo=UTC)
+    fresh = datetime(2026, 10, 1, 10, tzinfo=UTC)
+    active_signals: dict[str, bool | int | float] = {
+        "nipple_setup_out_of_age_target": True,
+        "nipple_flow_ml_min": 75,
+    }
+    safe_signals: dict[str, bool | int | float] = {
+        "nipple_setup_out_of_age_target": False,
+        "nipple_flow_ml_min": 75,
+    }
+    source = MemorySource({}, {1: {101, 102}, 2: {201}})
+    metadata = MemoryMetadata()
+    metadata.observations = {
+        1: TipObservation(1, config.tip_id, fresh, active_signals),
+        2: TipObservation(2, config.tip_id, fresh, safe_signals),
+    }
+    codec = BitmapCodec()
+    store = MemoryStore(codec)
+    publisher = AudiencePublisher(source, metadata, store, codec)
+
+    first = publisher.publish(config, evaluated_at=evaluated_at)
+    assert (first.member_count, first.evaluated_farms, first.unknown_farms) == (2, 2, 0)
+    assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == [101, 102]
+
+    metadata.observations[1] = TipObservation(
+        1,
+        config.tip_id,
+        datetime(2026, 9, 29, 10, tzinfo=UTC),
+        active_signals,
+    )
+    stale = publisher.publish(config, evaluated_at=evaluated_at)
+    assert (stale.member_count, stale.unknown_farms) == (2, 1)
+    assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == [101, 102]
+
+    metadata.observations[1] = TipObservation(1, config.tip_id, fresh, safe_signals)
+    resolved = publisher.publish(config, evaluated_at=evaluated_at)
+    assert (resolved.member_count, resolved.resolved_count) == (0, 2)
+    assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == []
+
+
+def test_tip_publisher_refuses_bootstrap_without_fresh_observations() -> None:
+    config = default_tip_audiences()[0].model_copy(update={"enabled": True})
+    metadata = MemoryMetadata()
+    codec = BitmapCodec()
+    publisher = AudiencePublisher(
+        MemorySource({}, {1: {101}}),
+        metadata,
+        MemoryStore(codec),
+        codec,
+    )
+
+    with pytest.raises(NoValidEvaluation):
+        publisher.publish(config, evaluated_at=datetime(2026, 10, 1, tzinfo=UTC))
+
+    assert metadata.refs == {}

@@ -4,13 +4,38 @@
 
 `docker/postgres/001_source_schema.sql` reproduz um schema mínimo e sintético (`farms`, `farm_owners`, `water_registries`, `tips`) para Compose. Não é migration nem prova de compatibilidade com produção. O único schema consultado é explicitado em `SourcePostgresRepository`; nomes/tipos e vínculo usuário-fazenda precisam ser confirmados contra a versão vigente antes de integração.
 
-A migration `migrations/001_audience_metadata.sql` cria apenas `audience_snapshot_refs` e `tip_audience_refs`. Não contém `user_id`, `farm_id`, membership ou dados binários. `tip_audience_refs.enabled` controla exposição; a definição Mongo habilitada e o vínculo SQL habilitado são ambos necessários.
+`migrations/001_audience_metadata.sql` cria `audience_snapshot_refs` e `tip_audience_refs`; `migrations/003_tip_observations.sql` cria `farm_tip_observations`, uma única medição completa por `(farm_id, tip_id)`, sem IDs de membros. `tip_audience_refs.enabled` controla exposição; a definição Mongo e o vínculo SQL precisam estar habilitados.
 
 ## Definições de audiência no MongoDB
 
-Cada documento de `ouros_audience.audience_definitions` representa um `WaterAudienceConfig`; `_id` é gerado pelo Mongo e ignorado pelo loader. `key` é único. O restante do documento segue os campos e limites tipados no modelo Pydantic: `version`, `enabled`, `subject`, `member_id_space`, `source`, `metric`, `period`, `baseline`, `activation_pct`, `resolution_pct`, `min_baseline_samples`, `max_observation_age_days`, `unknown_policy` e `first_run_push`.
+Cada documento de `ouros_audience.audience_definitions` representa um `WaterAudienceConfig` ou `TipAudienceConfig`; `_id` é gerado pelo Mongo e ignorado pelo loader. `key` é único. Regras tipadas definem as condições e nunca armazenam usuários ou resultados do filtro.
 
 O loader rejeita documentos inválidos ou com campos extras; falha de validação impede a inicialização em vez de aplicar defaults silenciosos. Mongo guarda apenas definições, nunca IDs de usuários ou resultados do filtro. A API carrega definições ao iniciar; alterações por CRUD administrativo atualizam somente o processo que atende à requisição. Outras instâncias/processos precisam reiniciar para refletir a mudança. Alterações diretas no Mongo exigem reiniciar todos os processos da API. `run-once` carrega definições frescas ao iniciar cada execução.
+
+## Regras das 32 dicas e observações POC
+
+`default_tip_audiences()` contém as 32 regras candidatas associadas aos IDs atuais de `public.tips`. `ouros-audience-engine seed-tip-audiences` verifica se todos os IDs existem, cria definições ausentes como desabilitadas e cria os vínculos SQL desabilitados. O comando é idempotente e recusa sobrescrever uma definição existente diferente; não publica snapshots nem habilita dicas.
+
+Um `TipAudienceConfig` tem `tip_id`, janela de freshness e `any_of`: cada ramo é AND de comparações; os ramos são OR. Comparações numéricas e booleanas são finitas e estritamente tipadas. Os campos definidos pela regra são o contrato exato de `signals`.
+
+Para registrar uma medição, um administrador Keycloak envia:
+
+```http
+PUT /internal/v1/admin/farms/{farm_id}/tips/{tip_id}/observation
+Content-Type: application/json
+
+{
+  "observed_at": "2026-10-27T12:00:00Z",
+  "signals": {
+    "nipple_setup_out_of_age_target": false,
+    "nipple_flow_ml_min": 75
+  }
+}
+```
+
+`signals` precisa conter exatamente todos os campos da regra, com tipos compatíveis. O PUT substitui o snapshot atual da combinação fazenda/dica; não há histórico de medições. O publisher calcula membership por fazenda e o expande aos `farm_owners`. Medição ausente, futura, incompleta ou expirada resulta UNKNOWN e preserva membership anterior; no bootstrap sem nenhuma fazenda válida, não publica bitmap vazio.
+
+Os dados de produção consultados atualmente não contêm a maioria das medições operacionais das 32 dicas. Alguns sinais são flags derivadas (por exemplo, comparação de custos ou adequação por idade) porque o guia não fornece todos os limiares numéricos. O endpoint apenas recebe valores; não inventa sensores nem calcula essas flags. Até um coletor ou operador admin enviar medições válidas, essas audiências permanecem sem membership calculável. As regras e limiares são POC e precisam de validação agronômica.
 
 ## Regra QA `high_water_consumption`
 
@@ -40,6 +65,6 @@ Os textos de dicas pertencem à integração Spring documentada em [SPRING_INTEG
 
 ## Endpoints administrativos
 
-As rotas `/internal/v1/admin/...` exigem access token Keycloak válido com role `admin`. O CRUD em `/admin/audiences` cria, busca, lista, edita e exclui definições Mongo; `/admin/tips` busca dicas, e as rotas `/admin/audiences/{key}/tips/{tip_id}` gerenciam vínculos PostgreSQL. A resolução de tips recebe somente a identidade do usuário, nunca uma definição de audiência enviada pelo cliente.
+As rotas `/internal/v1/admin/...` exigem access token Keycloak válido com role `admin`. O CRUD em `/admin/audiences` cria, busca, lista, edita e exclui definições Mongo; `/admin/tips` busca dicas, `/admin/audiences/{key}/tips/{tip_id}` gerencia vínculos PostgreSQL, e `/admin/farms/{farm_id}/tips/{tip_id}/observation` substitui a medição atual de uma fazenda/dica. A resolução de tips recebe somente a identidade do usuário, nunca uma definição de audiência enviada pelo cliente.
 
 Após POST/PUT/DELETE de definição, o processo API que atendeu a chamada recarrega sua configuração. Em deployments com múltiplos workers ou réplicas, os demais processos permanecem com a configuração anterior até reiniciarem. Alterações feitas diretamente no Mongo não atualizam nenhum processo em execução. Cada execução `run-once` lê a configuração atual do Mongo.

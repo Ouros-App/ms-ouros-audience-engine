@@ -14,9 +14,19 @@ Recriar fixtures limpas é destrutivo para dados locais: `docker compose down -v
 
 Mongo local usa `ouros_audience.audience_definitions` no volume `mongo_data`; o init script cria somente uma regra sintética para demo, nunca para produção. Use as rotas administrativas da API para gerenciar definições. Cada gravação recarrega apenas o processo que atendeu à requisição; reinicie os demais workers/réplicas. Alterações diretas no Mongo exigem reinício de todos os processos da API. A CLI carrega as definições ao iniciar cada execução.
 
+`migrations/003_tip_observations.sql` é aditiva. Em um volume Compose já existente, aplique-a sem recriar o volume:
+
+```bash
+docker compose exec -T postgres psql -U audience_owner -d audience -v ON_ERROR_STOP=1 < migrations/003_tip_observations.sql
+```
+
+O catálogo de regras usa IDs de dicas do banco atual de produção e não corresponde aos dois IDs sintéticos da fixture local. Depois de aplicar as migrations `001`–`003` pelo processo aprovado e implantar este código, execute `ouros-audience-engine seed-tip-audiences` uma vez no ambiente conectado ao banco com as 32 dicas. Ele cria definições e vínculos desabilitados; não sobrescreve definições existentes diferentes, não coleta medições e não publica snapshots.
+
+As regras só avaliam quando um admin Keycloak envia um snapshot completo em `PUT /internal/v1/admin/farms/{farm_id}/tips/{tip_id}/observation`. Valores ausentes ou vencidos são UNKNOWN; não envie valores inventados para preencher campos. Para ativar uma dica, atualize a versão e `enabled` da definição e habilite seu vínculo SQL pelo endpoint de vínculo. Faça `run-once --dry-run` antes de publicar; se todas as fazendas não tiverem dados válidos, o bootstrap falha em vez de gerar bitmap vazio.
+
 Em produção, configure no Discloud `ENVIRONMENT=production`, `INFISICAL_ENV=prod`, `INFISICAL_PROJECT_ID`, `INFISICAL_PATH=/ms-ouros-audience-engine` e um `INFISICAL_TOKEN` read-only escopado a `prod:/ms-ouros-audience-engine`; `INFISICAL_HOST` usa `https://app.infisical.com` por padrão. `ENVIRONMENT` é configuração do deploy, nunca um secret do Infisical. O bootstrap do Infisical é obrigatório em produção, valida o path e exige que os quatro secrets abaixo estejam presentes na resposta antes de aplicar qualquer valor ao processo; configuração parcial ou falha de acesso interrompe o startup.
 
-Mantenha nesse path `MONGODB_URI`, `SOURCE_DATABASE_URL`, `METADATA_DATABASE_URL` e `REDIS_URL`. A role Mongo deve ser customizada e restrita a `find`, `insert`, `update` e `remove` na coleção `ouros_audience.audience_definitions`. Aplique separadamente o índice único de `key`; a aplicação não cria índices e a credencial de serviço não precisa de `createIndex`. Não reutilize a URI `atlasAdmin` usada para provisionar o banco.
+Mantenha nesse path `MONGODB_URI`, `SOURCE_DATABASE_URL`, `METADATA_DATABASE_URL` e `REDIS_URL`. A role Mongo deve ser customizada e restrita a `find`, `insert`, `update` e `remove` na coleção `ouros_audience.audience_definitions`. `audience_metadata` precisa de SELECT em `farms` e SELECT/INSERT/UPDATE em `farm_tip_observations`, concedidos pela migration 003; não precisa de escrita nas tabelas de origem. Aplique separadamente o índice único de `key`; a aplicação não cria índices e a credencial de serviço não precisa de `createIndex`. Não reutilize a URI `atlasAdmin` usada para provisionar o banco.
 
 Redis local executa RDB (`save 60 1`) e mantém AOF habilitado; os arquivos ficam no volume `redis_data`. RDB é periódico e pode omitir alterações recentes se a persistência AOF também falhar. Não remova o volume. Em produção, habilite RDB/backups no provedor em armazenamento durável e confirme retenção e política `noeviction`.
 

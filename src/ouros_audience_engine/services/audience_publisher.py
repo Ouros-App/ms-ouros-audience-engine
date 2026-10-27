@@ -11,10 +11,13 @@ from ouros_audience_engine.adapters.redis_snapshot_store import (
     RedisSnapshotStore,
     SnapshotMissing,
 )
-from ouros_audience_engine.domain.audience import Evaluation
-from ouros_audience_engine.domain.config import WaterAudienceConfig
+from ouros_audience_engine.domain.audience import Evaluation, RuleOutcome
+from ouros_audience_engine.domain.config import (
+    AudienceDefinition,
+    WaterAudienceConfig,
+)
 from ouros_audience_engine.domain.manifest import SnapshotManifest
-from ouros_audience_engine.domain.rules import WaterConsumptionRule
+from ouros_audience_engine.domain.rules import TipObservationRule, WaterConsumptionRule
 from ouros_audience_engine.repositories.metadata_postgres import (
     MetadataPostgresRepository,
     SnapshotRef,
@@ -57,7 +60,7 @@ class AudiencePublisher:
 
     def publish(
         self,
-        audience: WaterAudienceConfig,
+        audience: AudienceDefinition,
         *,
         evaluated_at: datetime | None = None,
         dry_run: bool = False,
@@ -81,51 +84,94 @@ class AudiencePublisher:
                 snapshot_missing = True
                 logger.info("audience snapshot missing from Redis; rebuilding from source")
 
-        farm_inputs = self.source.load_water_audience_inputs(now)
-        current_owner_ids = {
-            owner_id for farm in farm_inputs.values() for owner_id in farm.owner_ids
-        }
-        self.codec.encode(current_owner_ids)
         current_members = BitMap()
         valid_farms = 0
         unknown_farms = 0
-        source_watermarks = [
-            period.source_watermark for farm in farm_inputs.values() for period in farm.periods
-        ]
-        source_watermark = max(source_watermarks) if source_watermarks else None
-        rule = WaterConsumptionRule(
-            activation_pct=Decimal(str(audience.activation_pct)),
-            resolution_pct=Decimal(str(audience.resolution_pct)),
-            min_baseline_samples=audience.min_baseline_samples,
-            max_observation_age_days=audience.max_observation_age_days,
-        )
+        source_watermarks: list[datetime] = []
 
-        for farm_id in sorted(farm_inputs):
-            farm = farm_inputs[farm_id]
-            if not farm.owner_ids:
-                continue
-            was_member = any(owner_id in previous for owner_id in farm.owner_ids)
-            outcome = rule.evaluate(
-                farm.periods,
-                was_member=was_member,
-                evaluated_at=now,
+        if isinstance(audience, WaterAudienceConfig):
+            farm_inputs = self.source.load_water_audience_inputs(now)
+            current_owner_ids = {
+                owner_id for farm in farm_inputs.values() for owner_id in farm.owner_ids
+            }
+            source_watermarks.extend(
+                period.source_watermark for farm in farm_inputs.values() for period in farm.periods
             )
-            if outcome.evaluation is Evaluation.UNKNOWN:
-                unknown_farms += 1
-                current_members.update(
-                    owner_id for owner_id in farm.owner_ids if owner_id in previous
+            water_rule = WaterConsumptionRule(
+                activation_pct=Decimal(str(audience.activation_pct)),
+                resolution_pct=Decimal(str(audience.resolution_pct)),
+                min_baseline_samples=audience.min_baseline_samples,
+                max_observation_age_days=audience.max_observation_age_days,
+            )
+            for farm_id in sorted(farm_inputs):
+                farm = farm_inputs[farm_id]
+                if not farm.owner_ids:
+                    continue
+                was_member = any(owner_id in previous for owner_id in farm.owner_ids)
+                outcome = water_rule.evaluate(
+                    farm.periods,
+                    was_member=was_member,
+                    evaluated_at=now,
                 )
-                continue
-            valid_farms += 1
-            if outcome.evaluation is Evaluation.ACTIVE:
-                current_members.update(farm.owner_ids)
-            logger.info(
-                "audience farm evaluated",
-                extra={
-                    "evaluation": outcome.evaluation.value,
-                    "reason": outcome.reason,
-                },
+                if outcome.evaluation is Evaluation.UNKNOWN:
+                    unknown_farms += 1
+                    current_members.update(
+                        owner_id for owner_id in farm.owner_ids if owner_id in previous
+                    )
+                    continue
+                valid_farms += 1
+                if outcome.evaluation is Evaluation.ACTIVE:
+                    current_members.update(farm.owner_ids)
+                logger.info(
+                    "audience farm evaluated",
+                    extra={
+                        "evaluation": outcome.evaluation.value,
+                        "reason": outcome.reason,
+                    },
+                )
+        else:
+            owners_by_farm = self.source.load_farm_owners()
+            current_owner_ids = {
+                owner_id for owner_ids in owners_by_farm.values() for owner_id in owner_ids
+            }
+            observations = self.metadata.tip_observations(audience.tip_id)
+            source_watermarks.extend(
+                observation.observed_at for observation in observations.values()
             )
+            tip_rule = TipObservationRule(audience)
+            for farm_id in sorted(owners_by_farm):
+                owner_ids = owners_by_farm[farm_id]
+                if not owner_ids:
+                    continue
+                observation = observations.get(farm_id)
+                outcome = (
+                    RuleOutcome(Evaluation.UNKNOWN, None, reason="NO_OBSERVATION")
+                    if observation is None
+                    else tip_rule.evaluate(
+                        observation.signals,
+                        observed_at=observation.observed_at,
+                        evaluated_at=now,
+                    )
+                )
+                if outcome.evaluation is Evaluation.UNKNOWN:
+                    unknown_farms += 1
+                    current_members.update(
+                        owner_id for owner_id in owner_ids if owner_id in previous
+                    )
+                    continue
+                valid_farms += 1
+                if outcome.evaluation is Evaluation.ACTIVE:
+                    current_members.update(owner_ids)
+                logger.info(
+                    "audience farm evaluated",
+                    extra={
+                        "evaluation": outcome.evaluation.value,
+                        "reason": outcome.reason,
+                    },
+                )
+
+        self.codec.encode(current_owner_ids)
+        source_watermark = max(source_watermarks) if source_watermarks else None
 
         if valid_farms == 0:
             if ref.snapshot_version > 0 and not snapshot_missing:

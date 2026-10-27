@@ -11,7 +11,13 @@ from jwt.exceptions import PyJWKClientConnectionError
 
 from ouros_audience_engine.adapters.redis_snapshot_store import SnapshotMissing
 from ouros_audience_engine.api.internal import ApiServices
-from ouros_audience_engine.domain.config import AudienceConfig, WaterAudienceConfig
+from ouros_audience_engine.domain.config import (
+    AudienceConfig,
+    AudienceDefinition,
+    TipAudienceConfig,
+    WaterAudienceConfig,
+)
+from ouros_audience_engine.domain.tip_audience_catalog import default_tip_audiences
 from ouros_audience_engine.main import create_app
 from ouros_audience_engine.repositories.audience_definitions_mongo import (
     AudienceDefinitionConflict,
@@ -24,14 +30,15 @@ _PUBLIC_KEY = _PRIVATE_KEY.public_key()
 _ISSUER = "https://issuer.example/realms/ouros"
 _AUDIENCE = "ms-ouros-audience-engine"
 
+
 class FakeDefinitions:
     def __init__(self) -> None:
-        self.items: dict[str, WaterAudienceConfig] = {}
+        self.items: dict[str, AudienceDefinition] = {}
 
     def load(self) -> AudienceConfig:
         return AudienceConfig(audiences=list(self.items.values()))
 
-    def list(self, search: str | None = None) -> list[WaterAudienceConfig]:
+    def list(self, search: str | None = None) -> list[AudienceDefinition]:
         return sorted(
             (
                 definition
@@ -41,15 +48,15 @@ class FakeDefinitions:
             key=lambda definition: definition.key,
         )
 
-    def get(self, key: str) -> WaterAudienceConfig | None:
+    def get(self, key: str) -> AudienceDefinition | None:
         return self.items.get(key)
 
-    def create(self, definition: WaterAudienceConfig) -> None:
+    def create(self, definition: AudienceDefinition) -> None:
         if definition.key in self.items:
             raise AudienceDefinitionConflict(definition.key)
         self.items[definition.key] = definition
 
-    def replace(self, key: str, definition: WaterAudienceConfig) -> bool:
+    def replace(self, key: str, definition: AudienceDefinition) -> bool:
         if key not in self.items:
             return False
         self.items[key] = definition
@@ -63,6 +70,17 @@ class FakeMetadata:
     def __init__(self) -> None:
         self.links: dict[str, dict[int, bool]] = {}
         self.tips = {10: "Hidrometro e leitura", 11: "Consumo de agua"}
+        self.observations: dict[tuple[int, int], tuple[datetime, dict[str, object]]] = {}
+
+    def upsert_tip_observation(
+        self,
+        farm_id: int,
+        tip_id: int,
+        observed_at: datetime,
+        signals: dict[str, object],
+    ) -> bool:
+        self.observations[(farm_id, tip_id)] = (observed_at, signals)
+        return True
 
     def enabled_tip_ids(self, keys: list[str]) -> dict[str, list[int]]:
         return {key: [10, 11] for key in keys}
@@ -82,9 +100,7 @@ class FakeMetadata:
     def publish_job_lock(self) -> AbstractContextManager[None]:
         return nullcontext()
 
-    def list_tips(
-        self, search: str | None, limit: int, offset: int
-    ) -> list[SimpleNamespace]:
+    def list_tips(self, search: str | None, limit: int, offset: int) -> list[SimpleNamespace]:
         matches = [
             SimpleNamespace(id=tip_id, tip=tip)
             for tip_id, tip in self.tips.items()
@@ -92,9 +108,7 @@ class FakeMetadata:
         ]
         return matches[offset : offset + limit]
 
-    def tip_links_for_audiences(
-        self, keys: list[str]
-    ) -> dict[str, list[SimpleNamespace]]:
+    def tip_links_for_audiences(self, keys: list[str]) -> dict[str, list[SimpleNamespace]]:
         return {
             key: [
                 SimpleNamespace(tip_id=tip_id, enabled=enabled)
@@ -103,10 +117,17 @@ class FakeMetadata:
             for key in keys
         }
 
-    def link_tip(self, audience_key: str, tip_id: int, rule_version: str) -> bool:
+    def link_tip(
+        self,
+        audience_key: str,
+        tip_id: int,
+        rule_version: str,
+        *,
+        enabled: bool = True,
+    ) -> bool:
         if tip_id not in self.tips:
             return False
-        self.links.setdefault(audience_key, {})[tip_id] = True
+        self.links.setdefault(audience_key, {})[tip_id] = enabled
         return True
 
     def unlink_tip(self, audience_key: str, tip_id: int) -> None:
@@ -144,7 +165,7 @@ class FakePublisher:
         self.reader = reader
         self.calls = 0
 
-    def publish(self, _audience: WaterAudienceConfig) -> None:
+    def publish(self, _audience: AudienceDefinition) -> None:
         self.calls += 1
         self.reader.members = {87}
         self.reader.missing = False
@@ -381,25 +402,29 @@ def test_admin_can_crud_audiences_and_manage_tip_links(monkeypatch) -> None:
         test_client.post("/internal/v1/admin/audiences", json=payload, headers=admin).status_code
         == 409
     )
-    assert len(
-        test_client.get(
-            "/internal/v1/admin/audiences", params={"search": "water"}, headers=admin
-        ).json()
-    ) == 1
+    assert (
+        len(
+            test_client.get(
+                "/internal/v1/admin/audiences", params={"search": "water"}, headers=admin
+            ).json()
+        )
+        == 1
+    )
     assert test_client.get(
         "/internal/v1/admin/tips", params={"search": "agua"}, headers=admin
     ).json() == [{"id": 11, "tip": "Consumo de agua"}]
 
-    link = test_client.put(
-        "/internal/v1/admin/audiences/water_saver/tips/10", headers=admin
-    )
+    link = test_client.put("/internal/v1/admin/audiences/water_saver/tips/10", headers=admin)
     assert link.status_code == 204
-    assert test_client.get(
-        "/internal/v1/admin/audiences/water_saver", headers=admin
-    ).json()["tips"] == [{"tip_id": 10, "enabled": True}]
-    assert test_client.put(
-        "/internal/v1/admin/audiences/water_saver/tips/999", headers=admin
-    ).status_code == 404
+    assert test_client.get("/internal/v1/admin/audiences/water_saver", headers=admin).json()[
+        "tips"
+    ] == [{"tip_id": 10, "enabled": True}]
+    assert (
+        test_client.put(
+            "/internal/v1/admin/audiences/water_saver/tips/999", headers=admin
+        ).status_code
+        == 404
+    )
 
     updated = payload | {"version": "2", "activation_pct": 30}
     response = test_client.put(
@@ -409,21 +434,29 @@ def test_admin_can_crud_audiences_and_manage_tip_links(monkeypatch) -> None:
     assert response.json()["definition"]["version"] == "2"
 
     stale_version = updated | {"activation_pct": 35}
-    assert test_client.put(
-        "/internal/v1/admin/audiences/water_saver",
-        json=stale_version,
-        headers=admin,
-    ).status_code == 409
-    assert test_client.delete(
-        "/internal/v1/admin/audiences/water_saver/tips/10", headers=admin
-    ).status_code == 204
-    assert test_client.delete(
-        "/internal/v1/admin/audiences/water_saver", headers=admin
-    ).status_code == 204
+    assert (
+        test_client.put(
+            "/internal/v1/admin/audiences/water_saver",
+            json=stale_version,
+            headers=admin,
+        ).status_code
+        == 409
+    )
+    assert (
+        test_client.delete(
+            "/internal/v1/admin/audiences/water_saver/tips/10", headers=admin
+        ).status_code
+        == 204
+    )
+    assert (
+        test_client.delete("/internal/v1/admin/audiences/water_saver", headers=admin).status_code
+        == 204
+    )
     assert reader.deleted_audiences == ["water_saver"]
-    assert test_client.get(
-        "/internal/v1/admin/audiences/water_saver", headers=admin
-    ).status_code == 404
+    assert (
+        test_client.get("/internal/v1/admin/audiences/water_saver", headers=admin).status_code
+        == 404
+    )
 
 
 def test_only_keycloak_admin_can_manage_audiences(monkeypatch) -> None:
@@ -433,6 +466,73 @@ def test_only_keycloak_admin_can_manage_audiences(monkeypatch) -> None:
 
     assert test_client.get("/internal/v1/admin/audiences").status_code == 401
     assert test_client.get("/internal/v1/admin/audiences", headers=owner).status_code == 403
-    assert test_client.delete(
-        "/internal/v1/admin/audiences/high_water_consumption", headers=owner
-    ).status_code == 403
+    assert (
+        test_client.delete(
+            "/internal/v1/admin/audiences/high_water_consumption", headers=owner
+        ).status_code
+        == 403
+    )
+
+
+def test_only_admin_can_upsert_complete_tip_observations(monkeypatch) -> None:
+    _install_test_jwks(monkeypatch)
+    test_client = client(FakeReader(), definitions=FakeDefinitions())
+    services = test_client.app.state.api_services
+    metadata = FakeMetadata()
+    services.metadata = metadata
+    definition: TipAudienceConfig = default_tip_audiences()[0]
+    services.config = AudienceConfig(audiences=[definition])
+    path = f"/internal/v1/admin/farms/7/tips/{definition.tip_id}/observation"
+    payload = {
+        "observed_at": datetime.now(UTC).isoformat(),
+        "signals": {
+            "nipple_setup_out_of_age_target": True,
+            "nipple_flow_ml_min": 75,
+        },
+    }
+    admin = {
+        "Authorization": f"Bearer {_token(user_id=None, account_type='admin', roles=['admin'])}"
+    }
+    owner = {"Authorization": f"Bearer {_token()}"}
+
+    assert test_client.put(path, json=payload).status_code == 401
+    assert test_client.put(path, json=payload, headers=owner).status_code == 403
+    saved = test_client.put(path, json=payload, headers=admin)
+
+    assert saved.status_code == 204
+    assert metadata.observations[(7, definition.tip_id)][1] == payload["signals"]
+    incomplete = payload | {"signals": {"nipple_flow_ml_min": 75}}
+    assert test_client.put(path, json=incomplete, headers=admin).status_code == 422
+    wrong_type = payload | {
+        "signals": {
+            "nipple_setup_out_of_age_target": 1,
+            "nipple_flow_ml_min": 75,
+        }
+    }
+    assert test_client.put(path, json=wrong_type, headers=admin).status_code == 422
+
+
+def test_admin_can_create_and_link_a_tip_rule(monkeypatch) -> None:
+    _install_test_jwks(monkeypatch)
+    definitions = FakeDefinitions()
+    test_client = client(FakeReader(), definitions=definitions)
+    admin = {
+        "Authorization": f"Bearer {_token(user_id=None, account_type='admin', roles=['admin'])}"
+    }
+    definition = default_tip_audiences()[0].model_copy(update={"enabled": True})
+    test_client.app.state.api_services.metadata.tips[definition.tip_id] = "Catalog tip"
+    created = test_client.post(
+        "/internal/v1/admin/audiences",
+        json=definition.model_dump(),
+        headers=admin,
+    )
+    assert created.status_code == 201
+    linked = test_client.put(
+        f"/internal/v1/admin/audiences/{definition.key}/tips/{definition.tip_id}",
+        headers=admin,
+    )
+
+    assert linked.status_code == 204
+    assert test_client.app.state.api_services.metadata.links[definition.key] == {
+        definition.tip_id: True
+    }

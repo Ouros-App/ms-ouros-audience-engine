@@ -13,8 +13,9 @@ services:
       - ./docker/postgres/001_source_schema.sql:/docker-entrypoint-initdb.d/001_source_schema.sql:ro
       - ./migrations/001_audience_metadata.sql:/docker-entrypoint-initdb.d/002_audience_metadata.sql:ro
       - ./migrations/002_audience_admin_api.sql:/docker-entrypoint-initdb.d/003_audience_admin_api.sql:ro
-      - ./docker/postgres/003_grants.sql:/docker-entrypoint-initdb.d/004_grants.sql:ro
-      - ./docker/postgres/004_demo_seed.sql:/docker-entrypoint-initdb.d/005_demo_seed.sql:ro
+      - ./migrations/003_tip_observations.sql:/docker-entrypoint-initdb.d/004_tip_observations.sql:ro
+      - ./docker/postgres/003_grants.sql:/docker-entrypoint-initdb.d/005_grants.sql:ro
+      - ./docker/postgres/004_demo_seed.sql:/docker-entrypoint-initdb.d/006_demo_seed.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U audience_owner -d audience"]
       interval: 5s
