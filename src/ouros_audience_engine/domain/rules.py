@@ -93,6 +93,37 @@ class WaterConsumptionRule:
         return RuleOutcome(result, watermark, increase)
 
 
+class DailyWaterMeterAuditRule:
+    def __init__(self, max_reading_age_hours: int = 24) -> None:
+        if max_reading_age_hours < 1:
+            raise ValueError("max reading age must be positive")
+        self.max_reading_age = timedelta(hours=max_reading_age_hours)
+
+    def evaluate(
+        self,
+        last_reading_at: datetime | None,
+        *,
+        source_watermark: datetime,
+        evaluated_at: datetime,
+    ) -> RuleOutcome:
+        if source_watermark.tzinfo is None or evaluated_at.tzinfo is None:
+            raise ValueError("source watermark and evaluation time must be timezone-aware")
+        watermark = source_watermark.astimezone(UTC)
+        evaluated_utc = evaluated_at.astimezone(UTC)
+        if watermark > evaluated_utc:
+            return RuleOutcome(Evaluation.UNKNOWN, watermark, reason="FUTURE_SOURCE_WATERMARK")
+        if last_reading_at is None:
+            return RuleOutcome(Evaluation.ACTIVE, watermark, reason="NO_METER_READING")
+        if last_reading_at.tzinfo is None:
+            return RuleOutcome(Evaluation.UNKNOWN, watermark, reason="INVALID_READING_TIMESTAMP")
+        reading = last_reading_at.astimezone(UTC)
+        if reading > evaluated_utc:
+            return RuleOutcome(Evaluation.UNKNOWN, watermark, reason="FUTURE_READING")
+        if evaluated_utc - reading >= self.max_reading_age:
+            return RuleOutcome(Evaluation.ACTIVE, watermark, reason="READING_OVERDUE")
+        return RuleOutcome(Evaluation.RESOLVED, watermark, reason="READING_CURRENT")
+
+
 class TipObservationRule:
     """Evaluates a tip's OR-of-AND conditions against one fresh farm observation."""
 

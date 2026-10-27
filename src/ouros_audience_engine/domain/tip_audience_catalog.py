@@ -1,6 +1,11 @@
 from typing import Literal
 
-from ouros_audience_engine.domain.config import RuleBranch, RuleClause, TipAudienceConfig
+from ouros_audience_engine.domain.config import (
+    DailyWaterMeterAuditConfig,
+    RuleBranch,
+    RuleClause,
+    TipAudienceConfig,
+)
 
 
 def _clause(
@@ -40,6 +45,23 @@ def _tip(
         tip_id=tip_id,
         any_of=list(branches),
         max_observation_age_days=max_age_days,
+        unknown_policy="preserve_previous_membership",
+        first_run_push=False,
+    )
+
+
+def daily_water_meter_audience() -> DailyWaterMeterAuditConfig:
+    return DailyWaterMeterAuditConfig(
+        key="daily_hydrometer_audit",
+        version="1",
+        enabled=True,
+        subject="farm",
+        member_id_space="farm_owner_user_id",
+        source="postgres",
+        metric="daily_water_meter_audit",
+        tip_id=121,
+        max_reading_age_hours=24,
+        max_observation_age_days=1,
         unknown_policy="preserve_previous_membership",
         first_run_push=False,
     )

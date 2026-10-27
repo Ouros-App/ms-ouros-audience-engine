@@ -30,6 +30,15 @@ def test_source_repository_reads_seeded_farms_and_monthly_water(database_url: st
     assert farms[1].periods[-1].period_start.isoformat() == "2026-09-01"
 
 
+
+def test_source_repository_reads_latest_meter_timestamp_for_farms(database_url: str) -> None:
+    inputs = SourcePostgresRepository(database_url).load_daily_water_meter_audit_inputs()
+
+    assert inputs.latest_reading_by_farm[1] == datetime(2026, 9, 28, tzinfo=UTC)
+    assert inputs.latest_reading_by_farm[2] == datetime(2026, 9, 28, tzinfo=UTC)
+    assert inputs.source_watermark is not None
+    assert inputs.source_watermark.tzinfo is not None
+
 def test_metadata_repository_publishes_links_and_enforces_snapshot_cas(
     database_url: str,
 ) -> None:

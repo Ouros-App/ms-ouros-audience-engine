@@ -1,15 +1,23 @@
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from ouros_audience_engine.domain.audience import Evaluation, MeasurementPeriod
 from ouros_audience_engine.domain.config import (
     AudienceConfig,
+    DailyWaterMeterAuditConfig,
     RuleBranch,
     RuleClause,
     TipAudienceConfig,
 )
-from ouros_audience_engine.domain.rules import TipObservationRule, WaterConsumptionRule
-from ouros_audience_engine.domain.tip_audience_catalog import default_tip_audiences
+from ouros_audience_engine.domain.rules import (
+    DailyWaterMeterAuditRule,
+    TipObservationRule,
+    WaterConsumptionRule,
+)
+from ouros_audience_engine.domain.tip_audience_catalog import (
+    daily_water_meter_audience,
+    default_tip_audiences,
+)
 
 
 def periods(values: list[str], first_month: date = date(2026, 1, 1)) -> list[MeasurementPeriod]:
@@ -254,3 +262,50 @@ def test_tip_catalog_covers_each_current_tip_once_and_starts_disabled() -> None:
     assert len(config.audiences) == 32
     assert all(not definition.enabled for definition in definitions)
     assert isinstance(dumped_numeric_threshold, float)
+
+def test_daily_water_meter_audience_flags_missing_or_overdue_readings() -> None:
+    evaluated_at = datetime(2026, 10, 27, 12, tzinfo=UTC)
+    source_watermark = evaluated_at
+    rule = DailyWaterMeterAuditRule(max_reading_age_hours=24)
+
+    missing = rule.evaluate(None, source_watermark=source_watermark, evaluated_at=evaluated_at)
+    boundary = rule.evaluate(
+        evaluated_at - timedelta(hours=24),
+        source_watermark=source_watermark,
+        evaluated_at=evaluated_at,
+    )
+    overdue = rule.evaluate(
+        evaluated_at - timedelta(hours=24, seconds=1),
+        source_watermark=source_watermark,
+        evaluated_at=evaluated_at,
+    )
+    current = rule.evaluate(
+        evaluated_at - timedelta(hours=23, minutes=59),
+        source_watermark=source_watermark,
+        evaluated_at=evaluated_at,
+    )
+    future = rule.evaluate(
+        evaluated_at + timedelta(seconds=1),
+        source_watermark=source_watermark,
+        evaluated_at=evaluated_at,
+    )
+
+    assert missing.evaluation is Evaluation.ACTIVE
+    assert overdue.evaluation is Evaluation.ACTIVE
+    assert boundary.evaluation is Evaluation.ACTIVE
+    assert current.evaluation is Evaluation.RESOLVED
+    assert future.evaluation is Evaluation.UNKNOWN
+    assert future.reason == "FUTURE_READING"
+
+
+def test_daily_water_meter_audience_is_linked_to_tip_121() -> None:
+    definition = daily_water_meter_audience()
+    AudienceConfig(audiences=[*default_tip_audiences(), definition])
+
+    assert isinstance(definition, DailyWaterMeterAuditConfig)
+    assert (definition.key, definition.tip_id, definition.max_reading_age_hours) == (
+        "daily_hydrometer_audit",
+        121,
+        24,
+    )
+    assert definition.enabled

@@ -41,7 +41,7 @@ def main() -> None:
     )
     commands.add_parser(
         "seed-tip-audiences",
-        help="create disabled POC rules for the 32 current tips",
+        help="seed the 32 disabled tip rules and the daily hydrometer audience",
     )
     args = parser.parse_args()
     settings = get_settings()

@@ -4,8 +4,8 @@ Serviço interno Python para calcular audiências determinísticas de `FARM_OWNE
 
 ## Estado e limites
 
-- Implementados neste repositório: API FastAPI interna com JWT Keycloak (RS256, issuer, audience e identidade/role FARM_OWNER), definições validadas no MongoDB, observações de fazenda/dica gravadas por admins no PostgreSQL, cálculo de membership, snapshots versionados no Redis e metadados/CAS.
-- `high_water_consumption` é uma fixture de QA. O catálogo de 32 dicas contém regras candidatas POC, desabilitadas por padrão; a maioria dos sinais não existe no schema de produção e precisa ser informada por operador/coletor. Os limiares não foram aprovados por agronomia.
+- Implementados neste repositório: API FastAPI interna com JWT Keycloak, definições validadas no MongoDB, regras de observação POC desabilitadas, cálculo de membership, snapshots versionados no Redis e metadados/CAS.
+- `daily_hydrometer_audit` é a única audiência de dica habilitada por dados atuais: inclui fazendas sem leitura de hidrômetro nas últimas 24 horas e está vinculada à dica 121. `high_water_consumption` continua fixture de QA; o schema não confirma periodicidade/completude suficientes para usar esse cálculo.
 - Não implementados aqui: integração `GET /tips/me` e autorização JWT no Spring, histórico/dispatcher de transições, persistência de notificações/FCM, mudanças no banco versionado, Android, scheduler gerenciado e retenção/GC dos snapshots Redis.
 - Não declarar o serviço pronto para produção. Não configure credenciais reais no Compose e não execute as SQL de demo em banco que não seja o stack local descartável.
 

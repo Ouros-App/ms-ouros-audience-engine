@@ -17,7 +17,10 @@ from ouros_audience_engine.domain.config import (
     TipAudienceConfig,
     WaterAudienceConfig,
 )
-from ouros_audience_engine.domain.tip_audience_catalog import default_tip_audiences
+from ouros_audience_engine.domain.tip_audience_catalog import (
+    daily_water_meter_audience,
+    default_tip_audiences,
+)
 from ouros_audience_engine.main import create_app
 from ouros_audience_engine.repositories.audience_definitions_mongo import (
     AudienceDefinitionConflict,
@@ -536,3 +539,29 @@ def test_admin_can_create_and_link_a_tip_rule(monkeypatch) -> None:
     assert test_client.app.state.api_services.metadata.links[definition.key] == {
         definition.tip_id: True
     }
+
+
+def test_daily_hydrometer_audience_can_link_only_its_configured_tip(monkeypatch) -> None:
+    _install_test_jwks(monkeypatch)
+    definitions = FakeDefinitions()
+    test_client = client(FakeReader(), definitions=definitions)
+    metadata = test_client.app.state.api_services.metadata
+    definition = daily_water_meter_audience()
+    definitions.create(definition)
+    metadata.tips[definition.tip_id] = "Auditoria diária de hidrômetro"
+    admin = {
+        "Authorization": f"Bearer {_token(user_id=None, account_type='admin', roles=['admin'])}"
+    }
+
+    wrong_link = test_client.put(
+        f"/internal/v1/admin/audiences/{definition.key}/tips/122",
+        headers=admin,
+    )
+    correct_link = test_client.put(
+        f"/internal/v1/admin/audiences/{definition.key}/tips/{definition.tip_id}",
+        headers=admin,
+    )
+
+    assert wrong_link.status_code == 409
+    assert correct_link.status_code == 204
+    assert metadata.links[definition.key] == {definition.tip_id: True}

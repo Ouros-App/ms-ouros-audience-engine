@@ -14,7 +14,7 @@ O loader rejeita documentos inválidos ou com campos extras; falha de validaçã
 
 ## Regras das 32 dicas e observações POC
 
-`default_tip_audiences()` contém as 32 regras candidatas associadas aos IDs atuais de `public.tips`. `ouros-audience-engine seed-tip-audiences` verifica se todos os IDs existem, cria definições ausentes como desabilitadas e cria os vínculos SQL desabilitados. O comando é idempotente e recusa sobrescrever uma definição existente diferente; não publica snapshots nem habilita dicas.
+`default_tip_audiences()` contém 32 regras candidatas associadas aos IDs atuais de `public.tips`. `seed-tip-audiences` cria regras e vínculos dessas dicas desabilitados e, separadamente, cria/habilita `daily_hydrometer_audit` para a dica 121. É idempotente e recusa sobrescrever definições diferentes; não publica snapshots.
 
 Um `TipAudienceConfig` tem `tip_id`, janela de freshness e `any_of`: cada ramo é AND de comparações; os ramos são OR. Comparações numéricas e booleanas são finitas e estritamente tipadas. Os campos definidos pela regra são o contrato exato de `signals`.
 
@@ -36,6 +36,13 @@ Content-Type: application/json
 `signals` precisa conter exatamente todos os campos da regra, com tipos compatíveis. O PUT substitui o snapshot atual da combinação fazenda/dica; não há histórico de medições. O publisher calcula membership por fazenda e o expande aos `farm_owners`. Medição ausente, futura, incompleta ou expirada resulta UNKNOWN e preserva membership anterior; no bootstrap sem nenhuma fazenda válida, não publica bitmap vazio.
 
 Os dados de produção consultados atualmente não contêm a maioria das medições operacionais das 32 dicas. Alguns sinais são flags derivadas (por exemplo, comparação de custos ou adequação por idade) porque o guia não fornece todos os limiares numéricos. O endpoint apenas recebe valores; não inventa sensores nem calcula essas flags. Até um coletor ou operador admin enviar medições válidas, essas audiências permanecem sem membership calculável. As regras e limiares são POC e precisam de validação agronômica.
+
+## Regra derivada: auditoria diária do hidrômetro
+
+`daily_hydrometer_audit` usa `public.water_registries.registration_date`, sem inventar sinais: uma fazenda entra se não tiver leitura ou se a mais recente tiver pelo menos 24 horas; leitura mais nova resolve a condição. Uma data futura ou fazenda ausente na consulta resulta UNKNOWN. Membros são os `farm_owners` da fazenda; o vínculo SQL habilitado é somente com `tips.id = 121`.
+
+`registration_date` não tem fuso no schema; o engine interpreta o valor como UTC, seguindo o acesso existente à tabela. O watermark do snapshot é o horário UTC da consulta de origem, e sua validade para a API é de um dia. Esta regra cobre a auditoria diária do hidrômetro, não comprova fluxo estático noturno, pH ou qualidade da água.
+
 
 ## Regra QA `high_water_consumption`
 

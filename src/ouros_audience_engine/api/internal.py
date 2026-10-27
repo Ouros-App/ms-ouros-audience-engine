@@ -26,6 +26,7 @@ from ouros_audience_engine.api.security import (
 from ouros_audience_engine.domain.config import (
     AudienceConfig,
     AudienceDefinition,
+    DailyWaterMeterAuditConfig,
     TipAudienceConfig,
 )
 from ouros_audience_engine.repositories.audience_definitions_mongo import (
@@ -320,9 +321,16 @@ def link_admin_tip(
         definition = repository.get(key)
         if definition is None:
             raise HTTPException(status_code=404, detail="audience not found")
-        if isinstance(definition, TipAudienceConfig) and definition.tip_id != tip_id:
+        if (
+            isinstance(definition, TipAudienceConfig | DailyWaterMeterAuditConfig)
+            and definition.tip_id != tip_id
+        ):
             raise HTTPException(status_code=409, detail="tip ID does not match audience rule")
-        enabled = definition.enabled if isinstance(definition, TipAudienceConfig) else True
+        enabled = (
+            definition.enabled
+            if isinstance(definition, TipAudienceConfig | DailyWaterMeterAuditConfig)
+            else True
+        )
         if not services.metadata.link_tip(key, tip_id, definition.version, enabled=enabled):
             raise HTTPException(status_code=404, detail="tip not found")
     except HTTPException:

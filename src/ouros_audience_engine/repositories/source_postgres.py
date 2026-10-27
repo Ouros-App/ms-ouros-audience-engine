@@ -15,6 +15,12 @@ class FarmData:
     periods: list[MeasurementPeriod] = field(default_factory=list)
 
 
+@dataclass(frozen=True, slots=True)
+class WaterMeterAuditInputs:
+    latest_reading_by_farm: dict[int, datetime | None]
+    source_watermark: datetime | None
+
+
 class SourcePostgresRepository:
     """Read-only adapter for the versioned OUROS farms, owners and water records."""
 
@@ -44,6 +50,40 @@ class SourcePostgresRepository:
             for row in cursor.fetchall():
                 farms.setdefault(int(row["farm_id"]), set()).add(int(row["owner_id"]))
         return farms
+
+    def load_daily_water_meter_audit_inputs(self) -> WaterMeterAuditInputs:
+        latest_reading_by_farm: dict[int, datetime | None] = {}
+        source_watermark: datetime | None = None
+        with (
+            psycopg.connect(
+                self.database_url,
+                connect_timeout=self.timeout_seconds,
+                options="-c default_transaction_read_only=on",
+                row_factory=dict_row,
+            ) as connection,
+            connection.cursor() as cursor,
+        ):
+            cursor.execute(
+                """
+                WITH source_state AS (
+                    SELECT
+                        farms.id AS farm_id,
+                        MAX(registries.registration_date) AT TIME ZONE 'UTC' AS last_reading_at,
+                        statement_timestamp() AS source_watermark
+                    FROM public.farms AS farms
+                    LEFT JOIN public.water_registries AS registries
+                        ON registries.id_farm = farms.id
+                    GROUP BY farms.id
+                )
+                SELECT farm_id, last_reading_at, source_watermark
+                FROM source_state
+                ORDER BY farm_id
+                """
+            )
+            for row in cursor.fetchall():
+                latest_reading_by_farm[int(row["farm_id"])] = row["last_reading_at"]
+                source_watermark = row["source_watermark"]
+        return WaterMeterAuditInputs(latest_reading_by_farm, source_watermark)
 
     def load_water_audience_inputs(self, evaluated_at: datetime) -> dict[int, FarmData]:
         if evaluated_at.tzinfo is None:

@@ -1,6 +1,13 @@
 from dataclasses import dataclass
 
-from ouros_audience_engine.domain.tip_audience_catalog import default_tip_audiences
+from ouros_audience_engine.domain.config import (
+    DailyWaterMeterAuditConfig,
+    TipAudienceConfig,
+)
+from ouros_audience_engine.domain.tip_audience_catalog import (
+    daily_water_meter_audience,
+    default_tip_audiences,
+)
 from ouros_audience_engine.repositories.audience_definitions_mongo import (
     AudienceDefinitionsMongoRepository,
 )
@@ -21,7 +28,10 @@ def seed_tip_audiences(
     definitions: AudienceDefinitionsMongoRepository,
     metadata: MetadataPostgresRepository,
 ) -> TipAudienceSeedResult:
-    catalog = default_tip_audiences()
+    catalog: tuple[TipAudienceConfig | DailyWaterMeterAuditConfig, ...] = (
+        *default_tip_audiences(),
+        daily_water_meter_audience(),
+    )
     expected_tip_ids = {item.tip_id for item in catalog}
     existing_tip_ids = {tip.id for tip in metadata.list_tips(search=None, limit=200, offset=0)}
     missing_tip_ids = expected_tip_ids - existing_tip_ids

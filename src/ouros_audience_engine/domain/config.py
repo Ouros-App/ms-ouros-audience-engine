@@ -96,8 +96,26 @@ class TipAudienceConfig(BaseModel):
         }
 
 
+class DailyWaterMeterAuditConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    key: str = Field(pattern=r"^[a-z][a-z0-9_]{1,62}$")
+    version: str = Field(min_length=1, max_length=32)
+    enabled: bool = False
+    subject: Literal["farm"]
+    member_id_space: Literal["farm_owner_user_id"]
+    source: Literal["postgres"]
+    metric: Literal["daily_water_meter_audit"]
+    tip_id: int = Field(gt=0, le=2_147_483_647)
+    max_reading_age_hours: int = Field(ge=1, le=168)
+    max_observation_age_days: int = Field(ge=1, le=7)
+    unknown_policy: Literal["preserve_previous_membership"]
+    first_run_push: Literal[False] = False
+
+
+
 AudienceDefinition = Annotated[
-    WaterAudienceConfig | TipAudienceConfig,
+    WaterAudienceConfig | TipAudienceConfig | DailyWaterMeterAuditConfig,
     Field(discriminator="metric"),
 ]
 

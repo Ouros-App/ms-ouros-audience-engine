@@ -1,6 +1,9 @@
 import pytest
 
-from ouros_audience_engine.domain.tip_audience_catalog import default_tip_audiences
+from ouros_audience_engine.domain.tip_audience_catalog import (
+    daily_water_meter_audience,
+    default_tip_audiences,
+)
 from ouros_audience_engine.repositories.metadata_postgres import Tip, TipAudienceLink
 from ouros_audience_engine.services.tip_audience_seed import (
     TipAudienceSeedError,
@@ -44,18 +47,25 @@ class MemoryMetadata:
         return True
 
 
-def test_seed_creates_all_tip_definitions_disabled_and_is_idempotent() -> None:
+def test_seed_creates_disabled_observation_rules_and_one_enabled_meter_audience() -> None:
     definitions = MemoryDefinitions()
     metadata = MemoryMetadata()
 
     first = seed_tip_audiences(definitions, metadata)
     second = seed_tip_audiences(definitions, metadata)
 
-    assert (first.created_count, first.linked_count) == (32, 32)
+    meter_key = daily_water_meter_audience().key
+    assert (first.created_count, first.linked_count) == (33, 33)
     assert (second.created_count, second.linked_count) == (0, 0)
-    assert len(definitions.items) == 32
-    assert all(not item.enabled for item in definitions.items.values())
-    assert all(len(links) == 1 and not links[0].enabled for links in metadata.links.values())
+    assert len(definitions.items) == 33
+    assert {key for key, item in definitions.items.items() if item.enabled} == {meter_key}
+    assert len(metadata.links) == 33
+    assert metadata.links[meter_key] == [TipAudienceLink(121, True)]
+    assert all(
+        not links[0].enabled
+        for key, links in metadata.links.items()
+        if key != meter_key
+    )
 
 
 def test_seed_refuses_to_overwrite_any_existing_custom_rule() -> None:

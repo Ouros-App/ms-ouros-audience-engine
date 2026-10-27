@@ -14,10 +14,15 @@ from ouros_audience_engine.adapters.redis_snapshot_store import (
 from ouros_audience_engine.domain.audience import Evaluation, RuleOutcome
 from ouros_audience_engine.domain.config import (
     AudienceDefinition,
+    DailyWaterMeterAuditConfig,
     WaterAudienceConfig,
 )
 from ouros_audience_engine.domain.manifest import SnapshotManifest
-from ouros_audience_engine.domain.rules import TipObservationRule, WaterConsumptionRule
+from ouros_audience_engine.domain.rules import (
+    DailyWaterMeterAuditRule,
+    TipObservationRule,
+    WaterConsumptionRule,
+)
 from ouros_audience_engine.repositories.metadata_postgres import (
     MetadataPostgresRepository,
     SnapshotRef,
@@ -90,7 +95,46 @@ class AudiencePublisher:
         unknown_farms = 0
         source_watermarks: list[datetime] = []
 
-        if isinstance(audience, WaterAudienceConfig):
+        if isinstance(audience, DailyWaterMeterAuditConfig):
+            owners_by_farm = self.source.load_farm_owners()
+            current_owner_ids = {
+                owner_id for owner_ids in owners_by_farm.values() for owner_id in owner_ids
+            }
+            meter_inputs = self.source.load_daily_water_meter_audit_inputs()
+            if (
+                evaluated_at is None
+                and meter_inputs.source_watermark is not None
+                and meter_inputs.source_watermark.tzinfo is not None
+            ):
+                now = max(now, meter_inputs.source_watermark.astimezone(UTC))
+            meter_rule = DailyWaterMeterAuditRule(audience.max_reading_age_hours)
+            for farm_id, owner_ids in sorted(owners_by_farm.items()):
+                if not owner_ids:
+                    continue
+                if (
+                    farm_id not in meter_inputs.latest_reading_by_farm
+                    or meter_inputs.source_watermark is None
+                ):
+                    outcome = RuleOutcome(Evaluation.UNKNOWN, None, reason="MISSING_SOURCE_DATA")
+                else:
+                    outcome = meter_rule.evaluate(
+                        meter_inputs.latest_reading_by_farm[farm_id],
+                        source_watermark=meter_inputs.source_watermark,
+                        evaluated_at=now,
+                    )
+                if outcome.evaluation is Evaluation.UNKNOWN:
+                    unknown_farms += 1
+                    if not rule_changed:
+                        current_members.update(
+                            owner_id for owner_id in owner_ids if owner_id in previous
+                        )
+                    continue
+                if outcome.source_watermark is not None:
+                    source_watermarks.append(outcome.source_watermark)
+                valid_farms += 1
+                if outcome.evaluation is Evaluation.ACTIVE:
+                    current_members.update(owner_ids)
+        elif isinstance(audience, WaterAudienceConfig):
             farm_inputs = self.source.load_water_audience_inputs(now)
             current_owner_ids = {
                 owner_id for farm in farm_inputs.values() for owner_id in farm.owner_ids
