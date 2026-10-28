@@ -10,6 +10,7 @@ from ouros_audience_engine.adapters.redis_snapshot_store import (
     SnapshotMissing,
     SnapshotUnavailable,
 )
+from ouros_audience_engine.api.rate_limit import enforce_internal_rate_limit
 from ouros_audience_engine.api.schemas import (
     ResolveRequest,
     ResolveResponse,
@@ -60,7 +61,11 @@ class ApiServices:
     definitions: AudienceDefinitionsMongoRepository | None = None
 
 
-router = APIRouter(prefix="/internal/v1", tags=["internal"])
+router = APIRouter(
+    prefix="/internal/v1",
+    tags=["internal"],
+    dependencies=[Depends(enforce_internal_rate_limit)],
+)
 
 
 def get_api_services(request: Request) -> ApiServices:

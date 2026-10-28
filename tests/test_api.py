@@ -9,6 +9,7 @@ import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi.testclient import TestClient
 from jwt.exceptions import PyJWKClientConnectionError
+from redis.exceptions import RedisError
 
 from ouros_audience_engine.adapters.redis_snapshot_store import SnapshotMissing
 from ouros_audience_engine.api.internal import ApiServices
@@ -178,6 +179,19 @@ class FakeReader:
         self.deleted_audiences.append(audience_key)
 
 
+class FakeRateLimitRedis:
+    def __init__(self) -> None:
+        self.counters: dict[str, int] = {}
+
+    def ping(self) -> bool:
+        return True
+
+    def eval(self, _script: str, _key_count: int, key: str, window_seconds: int) -> list[int]:
+        count = self.counters.get(key, 0) + 1
+        self.counters[key] = count
+        return [count, window_seconds]
+
+
 class FakePublisher:
     def __init__(self, reader: FakeReader) -> None:
         self.reader = reader
@@ -227,7 +241,7 @@ def client(
     runtime = SimpleNamespace(
         api=services,
         metadata=metadata,
-        redis_client=redis_client or SimpleNamespace(ping=lambda: True),
+        redis_client=redis_client or FakeRateLimitRedis(),
     )
     settings = Settings(
         keycloak_issuer_url=_ISSUER,
@@ -582,3 +596,33 @@ def test_daily_hydrometer_audience_can_link_only_its_configured_tip(monkeypatch)
     assert wrong_link.status_code == 409
     assert correct_link.status_code == 204
     assert metadata.links[definition.key] == {definition.tip_id: True}
+
+
+def test_internal_api_returns_429_after_client_window_and_leaves_health_open() -> None:
+    test_client = client(FakeReader(), redis_client=FakeRateLimitRedis())
+
+    for _ in range(60):
+        assert test_client.get("/internal/v1/admin/audiences").status_code == 401
+
+    limited = test_client.get("/internal/v1/admin/audiences")
+    assert limited.status_code == 429
+    assert limited.headers["retry-after"] == "60"
+    assert test_client.get("/health/live").status_code == 200
+
+
+def test_internal_api_fails_closed_when_rate_limit_store_is_unavailable() -> None:
+    class UnavailableRedis:
+        def ping(self) -> bool:
+            return True
+
+        def eval(
+            self, _script: str, _key_count: int, _key: str, _window_seconds: int
+        ) -> list[int]:
+            raise RedisError("rate limit store unavailable")
+
+    test_client = client(FakeReader(), redis_client=UnavailableRedis())
+
+    response = test_client.get("/internal/v1/admin/audiences")
+
+    assert response.status_code == 503
+    assert test_client.get("/health/live").status_code == 200
