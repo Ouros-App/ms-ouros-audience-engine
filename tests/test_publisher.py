@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from threading import Event as ThreadEvent
 
 import pytest
 from pyroaring import BitMap
@@ -7,11 +8,17 @@ from pyroaring import BitMap
 from ouros_audience_engine.adapters.bitmap_codec import BitmapCodec
 from ouros_audience_engine.adapters.redis_snapshot_store import SnapshotMissing
 from ouros_audience_engine.domain.audience import MeasurementPeriod
-from ouros_audience_engine.domain.config import WaterAudienceConfig
-from ouros_audience_engine.domain.tip_audience_catalog import default_tip_audiences
+from ouros_audience_engine.domain.config import DailyWaterMeterAuditConfig, WaterAudienceConfig
+from ouros_audience_engine.domain.tip_audience_catalog import (
+    daily_water_meter_audience,
+    default_tip_audiences,
+)
 from ouros_audience_engine.repositories.metadata_postgres import SnapshotRef, TipObservation
-from ouros_audience_engine.repositories.source_postgres import FarmData
-from ouros_audience_engine.services.audience_publisher import AudiencePublisher, NoValidEvaluation
+from ouros_audience_engine.repositories.source_postgres import FarmData, WaterMeterAuditInputs
+from ouros_audience_engine.services.audience_publisher import (
+    AudiencePublisher,
+    NoValidEvaluation,
+)
 
 
 class MemorySource:
@@ -22,6 +29,10 @@ class MemorySource:
     ) -> None:
         self.farms = farms
         self.owner_ids = owner_ids or {farm_id: farm.owner_ids for farm_id, farm in farms.items()}
+        self.meter_audit_inputs = WaterMeterAuditInputs({}, datetime(2026, 10, 1, tzinfo=UTC))
+
+    def load_daily_water_meter_audit_inputs(self) -> WaterMeterAuditInputs:
+        return self.meter_audit_inputs
 
     def load_farm_owners(self) -> dict[int, set[int]]:
         return self.owner_ids
@@ -380,3 +391,53 @@ def test_tip_publisher_refuses_bootstrap_without_fresh_observations() -> None:
         publisher.publish(config, evaluated_at=datetime(2026, 10, 1, tzinfo=UTC))
 
     assert metadata.refs == {}
+
+
+def test_daily_meter_audience_publishes_only_farms_without_recent_readings() -> None:
+    evaluated_at = datetime(2026, 10, 27, 12, tzinfo=UTC)
+    source = MemorySource({}, {1: {101, 102}, 2: {201}, 3: {301}})
+    source.meter_audit_inputs = WaterMeterAuditInputs(
+        {
+            1: evaluated_at - timedelta(hours=24, seconds=1),
+            2: evaluated_at - timedelta(hours=23, minutes=59),
+            3: None,
+        },
+        evaluated_at,
+    )
+    metadata = MemoryMetadata()
+    codec = BitmapCodec()
+    store = MemoryStore(codec)
+    publisher = AudiencePublisher(source, metadata, store, codec)
+
+    config = daily_water_meter_audience()
+    assert isinstance(config, DailyWaterMeterAuditConfig)
+    result = publisher.publish(config, evaluated_at=evaluated_at)
+
+    assert (result.status, result.member_count, result.unknown_farms) == ("PUBLISHED", 3, 0)
+    assert result.source_watermark == evaluated_at
+    assert list(store.get_bitmap(metadata.get_snapshot_ref("daily_hydrometer_audit"))) == [
+        101,
+        102,
+        301,
+    ]
+
+
+def test_publisher_stops_without_committing_when_shutdown_is_requested() -> None:
+    stop_event = ThreadEvent()
+
+    class StoppingSource(MemorySource):
+        def load_daily_water_meter_audit_inputs(self) -> WaterMeterAuditInputs:
+            stop_event.set()
+            return self.meter_audit_inputs
+
+    source = StoppingSource({}, {1: {101}})
+    metadata = MemoryMetadata()
+    codec = BitmapCodec()
+    store = MemoryStore(codec)
+    publisher = AudiencePublisher(source, metadata, store, codec)
+
+    with pytest.raises(InterruptedError):
+        publisher.publish(daily_water_meter_audience(), stop_event=stop_event)
+
+    assert metadata.refs == {}
+    assert store.objects == {}

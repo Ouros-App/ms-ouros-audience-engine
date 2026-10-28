@@ -10,11 +10,11 @@
 
 Cada documento de `ouros_audience.audience_definitions` representa um `WaterAudienceConfig` ou `TipAudienceConfig`; `_id` é gerado pelo Mongo e ignorado pelo loader. `key` é único. Regras tipadas definem as condições e nunca armazenam usuários ou resultados do filtro.
 
-O loader rejeita documentos inválidos ou com campos extras; falha de validação impede a inicialização em vez de aplicar defaults silenciosos. Mongo guarda apenas definições, nunca IDs de usuários ou resultados do filtro. A API carrega definições ao iniciar; alterações por CRUD administrativo atualizam somente o processo que atende à requisição. Outras instâncias/processos precisam reiniciar para refletir a mudança. Alterações diretas no Mongo exigem reiniciar todos os processos da API. `run-once` carrega definições frescas ao iniciar cada execução.
+O loader rejeita documentos inválidos ou com campos extras; falha de validação impede a inicialização em vez de aplicar defaults silenciosos. Mongo guarda apenas definições, nunca IDs de usuários ou resultados do filtro. A API carrega definições ao iniciar e o scheduler recarrega o Mongo a cada ciclo de 30 minutos. CRUD administrativo atualiza o processo que atende à chamada sob o mesmo lock da publicação; os demais processos e alterações diretas no Mongo são refletidos no ciclo seguinte, sem reinicialização. `run-once` carrega definições frescas ao iniciar cada execução.
 
 ## Regras das 32 dicas e observações POC
 
-`default_tip_audiences()` contém as 32 regras candidatas associadas aos IDs atuais de `public.tips`. `ouros-audience-engine seed-tip-audiences` verifica se todos os IDs existem, cria definições ausentes como desabilitadas e cria os vínculos SQL desabilitados. O comando é idempotente e recusa sobrescrever uma definição existente diferente; não publica snapshots nem habilita dicas.
+`default_tip_audiences()` contém 32 regras candidatas associadas aos IDs atuais de `public.tips`. `seed-tip-audiences` cria regras e vínculos dessas dicas desabilitados e, separadamente, cria/habilita `daily_hydrometer_audit` para a dica 121. É idempotente, reconcilia o estado `enabled` dos vínculos e recusa sobrescrever definições diferentes ou vínculos de dicas diferentes; não publica snapshots.
 
 Um `TipAudienceConfig` tem `tip_id`, janela de freshness e `any_of`: cada ramo é AND de comparações; os ramos são OR. Comparações numéricas e booleanas são finitas e estritamente tipadas. Os campos definidos pela regra são o contrato exato de `signals`.
 
@@ -36,6 +36,13 @@ Content-Type: application/json
 `signals` precisa conter exatamente todos os campos da regra, com tipos compatíveis. O PUT substitui o snapshot atual da combinação fazenda/dica; não há histórico de medições. O publisher calcula membership por fazenda e o expande aos `farm_owners`. Medição ausente, futura, incompleta ou expirada resulta UNKNOWN e preserva membership anterior; no bootstrap sem nenhuma fazenda válida, não publica bitmap vazio.
 
 Os dados de produção consultados atualmente não contêm a maioria das medições operacionais das 32 dicas. Alguns sinais são flags derivadas (por exemplo, comparação de custos ou adequação por idade) porque o guia não fornece todos os limiares numéricos. O endpoint apenas recebe valores; não inventa sensores nem calcula essas flags. Até um coletor ou operador admin enviar medições válidas, essas audiências permanecem sem membership calculável. As regras e limiares são POC e precisam de validação agronômica.
+
+## Regra derivada: auditoria diária do hidrômetro
+
+`daily_hydrometer_audit` usa `public.water_registries.registration_date`, sem inventar sinais: uma fazenda entra se não tiver leitura ou se a mais recente tiver pelo menos 24 horas; leitura mais nova resolve a condição. Uma data futura ou fazenda ausente na consulta resulta UNKNOWN. Membros são os `farm_owners` da fazenda; o vínculo SQL habilitado é somente com `tips.id = 121`.
+
+`registration_date` não tem fuso no schema; o engine interpreta o valor como UTC, seguindo o acesso existente à tabela. O watermark do snapshot é o horário UTC da consulta de origem, e sua validade para a API é de um dia. Esta regra cobre a auditoria diária do hidrômetro, não comprova fluxo estático noturno, pH ou qualidade da água.
+
 
 ## Regra QA `high_water_consumption`
 
@@ -67,4 +74,4 @@ Os textos de dicas pertencem à integração Spring documentada em [SPRING_INTEG
 
 As rotas `/internal/v1/admin/...` exigem access token Keycloak válido com role `admin`. O CRUD em `/admin/audiences` cria, busca, lista, edita e exclui definições Mongo; `/admin/tips` busca dicas, `/admin/audiences/{key}/tips/{tip_id}` gerencia vínculos PostgreSQL, e `/admin/farms/{farm_id}/tips/{tip_id}/observation` substitui a medição atual de uma fazenda/dica. A resolução de tips recebe somente a identidade do usuário, nunca uma definição de audiência enviada pelo cliente.
 
-Após POST/PUT/DELETE de definição, o processo API que atendeu a chamada recarrega sua configuração. Em deployments com múltiplos workers ou réplicas, os demais processos permanecem com a configuração anterior até reiniciarem. Alterações feitas diretamente no Mongo não atualizam nenhum processo em execução. Cada execução `run-once` lê a configuração atual do Mongo.
+Após POST/PUT/DELETE de definição, o processo API que atendeu a chamada recarrega sua configuração sob o lock compartilhado com o scheduler. Os outros processos e alterações diretas no Mongo aparecem no próximo ciclo periódico, sem reinício. Cada execução `run-once` também lê a configuração atual do Mongo.

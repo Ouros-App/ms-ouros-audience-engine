@@ -26,6 +26,7 @@ from ouros_audience_engine.api.security import (
 from ouros_audience_engine.domain.config import (
     AudienceConfig,
     AudienceDefinition,
+    DailyWaterMeterAuditConfig,
     TipAudienceConfig,
 )
 from ouros_audience_engine.repositories.audience_definitions_mongo import (
@@ -175,9 +176,10 @@ def create_admin_audience(
 ) -> dict[str, object]:
     repository = _require_definitions(services)
     try:
-        repository.create(definition)
-        services.config = repository.load()
-        return _admin_audience(definition, [])
+        with services.metadata.publish_job_lock():
+            repository.create(definition)
+            services.config = repository.load()
+            return _admin_audience(definition, [])
     except AudienceDefinitionConflict as exc:
         raise HTTPException(status_code=409, detail="audience already exists") from exc
     except Exception as exc:
@@ -196,22 +198,24 @@ def replace_admin_audience(
     if key != definition.key:
         raise HTTPException(status_code=422, detail="path key must match definition key")
     try:
-        current = repository.get(key)
-        if current is None:
-            raise HTTPException(status_code=404, detail="audience not found")
-        if (
-            current.model_dump(exclude={"version"}) != definition.model_dump(exclude={"version"})
-            and current.version == definition.version
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="changing audience rules requires a new version",
-            )
-        if not repository.replace(key, definition):
-            raise HTTPException(status_code=404, detail="audience not found")
-        services.config = repository.load()
-        links = services.metadata.tip_links_for_audiences([key])
-        return _admin_audience(definition, links.get(key, []))
+        with services.metadata.publish_job_lock():
+            current = repository.get(key)
+            if current is None:
+                raise HTTPException(status_code=404, detail="audience not found")
+            if (
+                current.model_dump(exclude={"version"})
+                != definition.model_dump(exclude={"version"})
+                and current.version == definition.version
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="changing audience rules requires a new version",
+                )
+            if not repository.replace(key, definition):
+                raise HTTPException(status_code=404, detail="audience not found")
+            services.config = repository.load()
+            links = services.metadata.tip_links_for_audiences([key])
+            return _admin_audience(definition, links.get(key, []))
     except HTTPException:
         raise
     except Exception as exc:
@@ -227,12 +231,13 @@ def delete_admin_audience(
 ) -> None:
     repository = _require_definitions(services)
     try:
-        if repository.get(key) is None:
-            raise HTTPException(status_code=404, detail="audience not found")
-        services.snapshot_store.delete_audience(key)
-        services.metadata.delete_audience(key)
-        repository.delete(key)
-        services.config = repository.load()
+        with services.metadata.publish_job_lock():
+            if repository.get(key) is None:
+                raise HTTPException(status_code=404, detail="audience not found")
+            services.snapshot_store.delete_audience(key)
+            services.metadata.delete_audience(key)
+            repository.delete(key)
+            services.config = repository.load()
     except HTTPException:
         raise
     except Exception as exc:
@@ -320,9 +325,16 @@ def link_admin_tip(
         definition = repository.get(key)
         if definition is None:
             raise HTTPException(status_code=404, detail="audience not found")
-        if isinstance(definition, TipAudienceConfig) and definition.tip_id != tip_id:
+        if (
+            isinstance(definition, TipAudienceConfig | DailyWaterMeterAuditConfig)
+            and definition.tip_id != tip_id
+        ):
             raise HTTPException(status_code=409, detail="tip ID does not match audience rule")
-        enabled = definition.enabled if isinstance(definition, TipAudienceConfig) else True
+        enabled = (
+            definition.enabled
+            if isinstance(definition, TipAudienceConfig | DailyWaterMeterAuditConfig)
+            else True
+        )
         if not services.metadata.link_tip(key, tip_id, definition.version, enabled=enabled):
             raise HTTPException(status_code=404, detail="tip not found")
     except HTTPException:

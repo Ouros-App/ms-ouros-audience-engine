@@ -39,7 +39,7 @@ Todas as rotas ficam sob `/internal/v1`. As rotas administrativas exigem access 
 
 Alterar qualquer campo da definição além de `version` exige uma nova versão. A versão nova invalida o snapshot anterior, que o Engine recalcula na próxima consulta de participação. Ao excluir uma audiência, o Engine remove as chaves bitmap/manifest do Redis e as referências do PostgreSQL antes de remover a definição do MongoDB. Esses bancos não compartilham transação; uma falha durante a exclusão pode exigir reparo administrativo.
 
-Após POST/PUT/DELETE da definição, somente o processo API que atendeu a requisição recarrega sua configuração. Em instalações com vários workers/replicas, reinicie os demais processos; alterações diretas no Mongo exigem reiniciar todos. `run-once` lê as definições atuais a cada execução.
+Após POST/PUT/DELETE da definição, somente o processo API que atendeu a requisição recarrega sua configuração. Em instalações com vários workers/réplicas, os demais processos e as alterações diretas no Mongo são refletidos no próximo ciclo de 30 minutos, sem reinicialização. `run-once` lê as definições atuais a cada execução.
 
 O role de metadados do banco precisa receber os grants de `migrations/002_audience_admin_api.sql` antes de essas rotas pesquisarem dicas ou alterarem vínculos. A credencial `MONGODB_URI` do serviço precisa de `find`, `insert`, `update` e `remove` restritos à coleção de definições; provisionar o índice único de `key` separadamente.
 

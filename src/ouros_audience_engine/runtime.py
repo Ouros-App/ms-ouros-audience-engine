@@ -35,6 +35,7 @@ def build_runtime(settings: Settings) -> Runtime:
     mongo_client: MongoClient[dict[str, Any]] = MongoClient(
         settings.mongodb_uri,
         serverSelectionTimeoutMS=settings.source_timeout_seconds * 1000,
+        timeoutMS=settings.source_timeout_seconds * 1000,
     )
     try:
         definitions = AudienceDefinitionsMongoRepository(

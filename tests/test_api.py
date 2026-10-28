@@ -1,4 +1,5 @@
-from contextlib import AbstractContextManager, nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -17,7 +18,10 @@ from ouros_audience_engine.domain.config import (
     TipAudienceConfig,
     WaterAudienceConfig,
 )
-from ouros_audience_engine.domain.tip_audience_catalog import default_tip_audiences
+from ouros_audience_engine.domain.tip_audience_catalog import (
+    daily_water_meter_audience,
+    default_tip_audiences,
+)
 from ouros_audience_engine.main import create_app
 from ouros_audience_engine.repositories.audience_definitions_mongo import (
     AudienceDefinitionConflict,
@@ -34,6 +38,11 @@ _AUDIENCE = "ms-ouros-audience-engine"
 class FakeDefinitions:
     def __init__(self) -> None:
         self.items: dict[str, AudienceDefinition] = {}
+        self.lock_active: Callable[[], bool] | None = None
+
+    def _assert_write_locked(self) -> None:
+        if self.lock_active is not None and not self.lock_active():
+            raise AssertionError("audience definition mutation must hold the publish lock")
 
     def load(self) -> AudienceConfig:
         return AudienceConfig(audiences=list(self.items.values()))
@@ -52,22 +61,26 @@ class FakeDefinitions:
         return self.items.get(key)
 
     def create(self, definition: AudienceDefinition) -> None:
+        self._assert_write_locked()
         if definition.key in self.items:
             raise AudienceDefinitionConflict(definition.key)
         self.items[definition.key] = definition
 
     def replace(self, key: str, definition: AudienceDefinition) -> bool:
+        self._assert_write_locked()
         if key not in self.items:
             return False
         self.items[key] = definition
         return True
 
     def delete(self, key: str) -> bool:
+        self._assert_write_locked()
         return self.items.pop(key, None) is not None
 
 
 class FakeMetadata:
     def __init__(self) -> None:
+        self.publish_lock_active = False
         self.links: dict[str, dict[int, bool]] = {}
         self.tips = {10: "Hidrometro e leitura", 11: "Consumo de agua"}
         self.observations: dict[tuple[int, int], tuple[datetime, dict[str, object]]] = {}
@@ -97,8 +110,13 @@ class FakeMetadata:
     def check(self) -> None:
         pass
 
-    def publish_job_lock(self) -> AbstractContextManager[None]:
-        return nullcontext()
+    @contextmanager
+    def publish_job_lock(self) -> Iterator[None]:
+        self.publish_lock_active = True
+        try:
+            yield
+        finally:
+            self.publish_lock_active = False
 
     def list_tips(self, search: str | None, limit: int, offset: int) -> list[SimpleNamespace]:
         matches = [
@@ -216,7 +234,7 @@ def client(
         keycloak_audience=_AUDIENCE,
         keycloak_jwks_url="https://issuer.example/certs",
     )
-    return TestClient(create_app(settings, runtime))
+    return TestClient(create_app(settings, runtime, enable_scheduler=False))
 
 
 def _token(
@@ -386,6 +404,8 @@ def test_admin_can_crud_audiences_and_manage_tip_links(monkeypatch) -> None:
     definitions = FakeDefinitions()
     reader = FakeReader()
     test_client = client(reader, definitions=definitions)
+    metadata = test_client.app.state.api_services.metadata
+    definitions.lock_active = lambda: metadata.publish_lock_active
     admin_token = _token(
         user_id=None,
         account_type="admin",
@@ -536,3 +556,29 @@ def test_admin_can_create_and_link_a_tip_rule(monkeypatch) -> None:
     assert test_client.app.state.api_services.metadata.links[definition.key] == {
         definition.tip_id: True
     }
+
+
+def test_daily_hydrometer_audience_can_link_only_its_configured_tip(monkeypatch) -> None:
+    _install_test_jwks(monkeypatch)
+    definitions = FakeDefinitions()
+    test_client = client(FakeReader(), definitions=definitions)
+    metadata = test_client.app.state.api_services.metadata
+    definition = daily_water_meter_audience()
+    definitions.create(definition)
+    metadata.tips[definition.tip_id] = "Auditoria diária de hidrômetro"
+    admin = {
+        "Authorization": f"Bearer {_token(user_id=None, account_type='admin', roles=['admin'])}"
+    }
+
+    wrong_link = test_client.put(
+        f"/internal/v1/admin/audiences/{definition.key}/tips/122",
+        headers=admin,
+    )
+    correct_link = test_client.put(
+        f"/internal/v1/admin/audiences/{definition.key}/tips/{definition.tip_id}",
+        headers=admin,
+    )
+
+    assert wrong_link.status_code == 409
+    assert correct_link.status_code == 204
+    assert metadata.links[definition.key] == {definition.tip_id: True}
