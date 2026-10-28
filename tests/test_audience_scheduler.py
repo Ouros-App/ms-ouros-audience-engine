@@ -94,9 +94,15 @@ def test_app_starts_and_stops_scheduler_with_lifespan(monkeypatch) -> None:
     started = ThreadEvent()
     stopped = ThreadEvent()
 
-    async def wait_for_stop(_runtime, stop_event) -> None:
+    async def wait_for_stop(
+        _runtime,
+        stop_event,
+        *,
+        publication_stop_event: ThreadEvent,
+    ) -> None:
         started.set()
         await stop_event.wait()
+        assert publication_stop_event.is_set()
         stopped.set()
 
     monkeypatch.setattr("ouros_audience_engine.main.run_periodically", wait_for_stop)
@@ -105,3 +111,48 @@ def test_app_starts_and_stops_scheduler_with_lifespan(monkeypatch) -> None:
     with TestClient(create_app(Settings(), runtime)):
         assert started.wait(1)
     assert stopped.wait(1)
+
+
+def test_app_shutdown_stops_an_in_flight_publication(monkeypatch) -> None:
+    publication_started = ThreadEvent()
+    publication_stopped = ThreadEvent()
+    close_calls: list[bool] = []
+    audience = daily_water_meter_audience()
+    config = AudienceConfig(audiences=[audience])
+
+    @contextmanager
+    def publish_lock() -> Iterator[None]:
+        yield
+
+    class Publisher:
+        def publish(self, _audience, *, stop_event: ThreadEvent):
+            publication_started.set()
+            assert stop_event.wait(1)
+            publication_stopped.set()
+            raise InterruptedError("publication stopped for shutdown")
+
+    class ClosingClient:
+        def close(self) -> None:
+            assert publication_stopped.is_set()
+            close_calls.append(True)
+
+    runtime = SimpleNamespace(
+        api=SimpleNamespace(
+            config=AudienceConfig(audiences=[]),
+            definitions=SimpleNamespace(load=lambda: config),
+        ),
+        metadata=SimpleNamespace(publish_job_lock=publish_lock),
+        publisher=Publisher(),
+        redis_client=ClosingClient(),
+        mongo_client=ClosingClient(),
+    )
+    monkeypatch.setattr(
+        "ouros_audience_engine.main.build_runtime",
+        lambda _settings: runtime,
+    )
+
+    with TestClient(create_app(Settings())):
+        assert publication_started.wait(1)
+
+    assert publication_stopped.is_set()
+    assert len(close_calls) == 2

@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from threading import Event as ThreadEvent
 
 from fastapi import FastAPI
 
@@ -27,12 +28,22 @@ def create_app(
         app.state.settings = active_settings
         stop_event: asyncio.Event | None = None
         scheduler_task: asyncio.Task[None] | None = None
+        publication_stop_event: ThreadEvent | None = None
         if enable_scheduler:
             stop_event = asyncio.Event()
-            scheduler_task = asyncio.create_task(run_periodically(active_runtime, stop_event))
+            publication_stop_event = ThreadEvent()
+            scheduler_task = asyncio.create_task(
+                run_periodically(
+                    active_runtime,
+                    stop_event,
+                    publication_stop_event=publication_stop_event,
+                )
+            )
         try:
             yield
         finally:
+            if publication_stop_event is not None:
+                publication_stop_event.set()
             if stop_event is not None:
                 stop_event.set()
             if scheduler_task is not None:

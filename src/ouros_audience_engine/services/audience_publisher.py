@@ -3,6 +3,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
+from threading import Event as ThreadEvent
 
 from pyroaring import BitMap
 
@@ -30,6 +31,11 @@ from ouros_audience_engine.repositories.metadata_postgres import (
 from ouros_audience_engine.repositories.source_postgres import SourcePostgresRepository
 
 logger = logging.getLogger(__name__)
+
+
+def _raise_if_stopping(stop_event: ThreadEvent | None) -> None:
+    if stop_event is not None and stop_event.is_set():
+        raise InterruptedError("audience publication stopped for shutdown")
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,9 +75,11 @@ class AudiencePublisher:
         *,
         evaluated_at: datetime | None = None,
         dry_run: bool = False,
+        stop_event: ThreadEvent | None = None,
     ) -> PublishResult:
         if not audience.enabled:
             return PublishResult(audience.key, "DISABLED", 0, 0, 0, 0, 0, 0, 0, None)
+        _raise_if_stopping(stop_event)
         now = evaluated_at or datetime.now(UTC)
         if now.tzinfo is None:
             raise ValueError("evaluated_at must be timezone-aware")
@@ -81,6 +89,7 @@ class AudiencePublisher:
         except LookupError:
             ref = SnapshotRef(audience.key, 0, None, None, None, audience.version, None, None)
         rule_changed = ref.snapshot_version > 0 and ref.rule_version != audience.version
+        _raise_if_stopping(stop_event)
         previous = BitMap()
         snapshot_missing = False
         if ref.snapshot_version > 0:
@@ -90,6 +99,7 @@ class AudiencePublisher:
                 snapshot_missing = True
                 logger.info("audience snapshot missing from Redis; rebuilding from source")
 
+        _raise_if_stopping(stop_event)
         current_members = BitMap()
         valid_farms = 0
         unknown_farms = 0
@@ -97,10 +107,12 @@ class AudiencePublisher:
 
         if isinstance(audience, DailyWaterMeterAuditConfig):
             owners_by_farm = self.source.load_farm_owners()
+            _raise_if_stopping(stop_event)
             current_owner_ids = {
                 owner_id for owner_ids in owners_by_farm.values() for owner_id in owner_ids
             }
             meter_inputs = self.source.load_daily_water_meter_audit_inputs()
+            _raise_if_stopping(stop_event)
             if (
                 evaluated_at is None
                 and meter_inputs.source_watermark is not None
@@ -109,6 +121,7 @@ class AudiencePublisher:
                 now = max(now, meter_inputs.source_watermark.astimezone(UTC))
             meter_rule = DailyWaterMeterAuditRule(audience.max_reading_age_hours)
             for farm_id, owner_ids in sorted(owners_by_farm.items()):
+                _raise_if_stopping(stop_event)
                 if not owner_ids:
                     continue
                 if (
@@ -136,6 +149,7 @@ class AudiencePublisher:
                     current_members.update(owner_ids)
         elif isinstance(audience, WaterAudienceConfig):
             farm_inputs = self.source.load_water_audience_inputs(now)
+            _raise_if_stopping(stop_event)
             current_owner_ids = {
                 owner_id for farm in farm_inputs.values() for owner_id in farm.owner_ids
             }
@@ -146,6 +160,7 @@ class AudiencePublisher:
                 max_observation_age_days=audience.max_observation_age_days,
             )
             for farm_id in sorted(farm_inputs):
+                _raise_if_stopping(stop_event)
                 farm = farm_inputs[farm_id]
                 if not farm.owner_ids:
                     continue
@@ -176,12 +191,15 @@ class AudiencePublisher:
                 )
         else:
             owners_by_farm = self.source.load_farm_owners()
+            _raise_if_stopping(stop_event)
             current_owner_ids = {
                 owner_id for owner_ids in owners_by_farm.values() for owner_id in owner_ids
             }
             observations = self.metadata.tip_observations(audience.tip_id)
+            _raise_if_stopping(stop_event)
             tip_rule = TipObservationRule(audience)
             for farm_id in sorted(owners_by_farm):
+                _raise_if_stopping(stop_event)
                 owner_ids = owners_by_farm[farm_id]
                 if not owner_ids:
                     continue
@@ -215,7 +233,9 @@ class AudiencePublisher:
                     },
                 )
 
+        _raise_if_stopping(stop_event)
         self.codec.encode(current_owner_ids)
+        _raise_if_stopping(stop_event)
         source_watermark = (
             min(source_watermarks)
             if valid_farms > 0 and unknown_farms == 0 and source_watermarks
@@ -253,6 +273,7 @@ class AudiencePublisher:
             status = "UNCHANGED"
         else:
             status = "DRY_RUN" if dry_run else "PUBLISHED"
+        _raise_if_stopping(stop_event)
         if unchanged_unknown and ref.source_watermark is None:
             return PublishResult(
                 audience.key,
@@ -288,6 +309,7 @@ class AudiencePublisher:
         resolved_count = 0 if bootstrap else len(resolved_ids)
         revoked_count = 0 if bootstrap else len(revoked_ids)
 
+        _raise_if_stopping(stop_event)
         if dry_run:
             return PublishResult(
                 audience.key,
@@ -302,6 +324,7 @@ class AudiencePublisher:
                 source_watermark,
             )
 
+        _raise_if_stopping(stop_event)
         self.metadata.ensure_audience(audience.key, audience.version)
         self.snapshot_store.put_immutable(object_key, payload)
         self.snapshot_store.put_immutable(manifest_key, manifest_payload)

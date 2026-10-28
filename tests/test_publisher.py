@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from threading import Event as ThreadEvent
 
 import pytest
 from pyroaring import BitMap
@@ -14,7 +15,10 @@ from ouros_audience_engine.domain.tip_audience_catalog import (
 )
 from ouros_audience_engine.repositories.metadata_postgres import SnapshotRef, TipObservation
 from ouros_audience_engine.repositories.source_postgres import FarmData, WaterMeterAuditInputs
-from ouros_audience_engine.services.audience_publisher import AudiencePublisher, NoValidEvaluation
+from ouros_audience_engine.services.audience_publisher import (
+    AudiencePublisher,
+    NoValidEvaluation,
+)
 
 
 class MemorySource:
@@ -416,3 +420,24 @@ def test_daily_meter_audience_publishes_only_farms_without_recent_readings() -> 
         102,
         301,
     ]
+
+
+def test_publisher_stops_without_committing_when_shutdown_is_requested() -> None:
+    stop_event = ThreadEvent()
+
+    class StoppingSource(MemorySource):
+        def load_daily_water_meter_audit_inputs(self) -> WaterMeterAuditInputs:
+            stop_event.set()
+            return self.meter_audit_inputs
+
+    source = StoppingSource({}, {1: {101}})
+    metadata = MemoryMetadata()
+    codec = BitmapCodec()
+    store = MemoryStore(codec)
+    publisher = AudiencePublisher(source, metadata, store, codec)
+
+    with pytest.raises(InterruptedError):
+        publisher.publish(daily_water_meter_audience(), stop_event=stop_event)
+
+    assert metadata.refs == {}
+    assert store.objects == {}
