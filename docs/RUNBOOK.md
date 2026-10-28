@@ -12,7 +12,7 @@ make down
 
 Recriar fixtures limpas é destrutivo para dados locais: `docker compose down -v`, depois `make up`. Não executar esse comando em contexto que contenha dados a preservar.
 
-Mongo local usa `ouros_audience.audience_definitions` no volume `mongo_data`; o init script cria somente uma regra sintética para demo, nunca para produção. Use as rotas administrativas da API para gerenciar definições. Cada gravação recarrega apenas o processo que atendeu à requisição; reinicie os demais workers/réplicas. Alterações diretas no Mongo exigem reinício de todos os processos da API. A CLI carrega as definições ao iniciar cada execução.
+Mongo local usa `ouros_audience.audience_definitions` no volume `mongo_data`; o init script cria somente uma regra sintética para demo, nunca para produção. Use as rotas administrativas da API para gerenciar definições. Cada gravação recarrega apenas o processo que atendeu à requisição; os demais workers/réplicas e alterações diretas no Mongo são refletidos no próximo ciclo de 30 minutos, sem reinicialização. A CLI carrega as definições ao iniciar cada execução.
 
 `migrations/003_tip_observations.sql` é aditiva. Em um volume Compose já existente, aplique-a sem recriar o volume:
 
