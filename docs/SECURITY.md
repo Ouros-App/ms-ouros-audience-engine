@@ -7,7 +7,7 @@
 - A conexão à origem PostgreSQL abre transação read-only; o schema local concede ao `audience_source` somente SELECT em tabelas operacionais.
 - Conta `audience_metadata` tem SELECT em catálogo/vínculos e SELECT/INSERT/UPDATE apenas em referências de snapshot; não recebe grants de escrita na origem.
 - A resolução não aceita definições de audiência enviadas por clientes e Mongo nunca armazena membership. Rotas administrativas permitem criar, alterar e remover definições com token Keycloak e role `admin`; o `MONGODB_URI` único do serviço lê e grava apenas `ouros_audience.audience_definitions`.
-- As rotas `/internal/v1` usam limite distribuído no Redis de 60 requisições por IP observado pela aplicação a cada 60 segundos; exceder o limite retorna `429` com `Retry-After`. O limitador falha fechado com `503` se o Redis estiver indisponível. `/health/live` e `/health/ready` ficam fora do limite.
+- As rotas `/internal/v1` usam limite distribuído no Redis de 60 requisições por `request.client.host` a cada 60 segundos; exceder o limite retorna `429` com `Retry-After`, e falha do Redis retorna `503`. Em produção no Discloud, configure `FORWARDED_ALLOW_IPS` somente com os IPs de origem confiáveis para que o Uvicorn normalize o IP real; não use `*`. Sem isso, clientes podem compartilhar a quota. `/health/live` e `/health/ready` ficam fora do limite.
 - As portas dos serviços Compose são publicadas apenas em `127.0.0.1`; Postgres, Mongo, Redis usam fixtures locais e não substituem serviços de produção.
 
 ## Requisitos antes de qualquer ambiente real
