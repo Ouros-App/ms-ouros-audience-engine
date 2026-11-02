@@ -15,6 +15,10 @@ from ouros_audience_engine.repositories.audience_definitions_mongo import (
 )
 from ouros_audience_engine.repositories.metadata_postgres import MetadataPostgresRepository
 from ouros_audience_engine.repositories.source_postgres import SourcePostgresRepository
+from ouros_audience_engine.services.audience_notifications import (
+    AudienceNotificationState,
+    SpringNotificationDispatcher,
+)
 from ouros_audience_engine.services.audience_publisher import AudiencePublisher
 from ouros_audience_engine.settings import Settings
 
@@ -29,6 +33,8 @@ class Runtime:
     redis_client: redis.Redis
     mongo_client: MongoClient[dict[str, Any]]
     config: AudienceConfig
+    notification_state: AudienceNotificationState
+    notification_dispatcher: SpringNotificationDispatcher
 
 
 def build_runtime(settings: Settings) -> Runtime:
@@ -61,6 +67,22 @@ def build_runtime(settings: Settings) -> Runtime:
     snapshot_store = RedisSnapshotStore(redis_client, codec)
     publisher = AudiencePublisher(source, metadata, snapshot_store, codec)
     api = ApiServices(metadata, snapshot_store, publisher, config, definitions)
+    notification_state = AudienceNotificationState(redis_client)
+    notification_dispatcher = SpringNotificationDispatcher(
+        notification_state,
+        settings.spring_api_url,
+        settings.spring_internal_service_key,
+        settings.source_timeout_seconds,
+    )
     return Runtime(
-        api, source, metadata, snapshot_store, publisher, redis_client, mongo_client, config
+        api,
+        source,
+        metadata,
+        snapshot_store,
+        publisher,
+        redis_client,
+        mongo_client,
+        config,
+        notification_state,
+        notification_dispatcher,
     )

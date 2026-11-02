@@ -35,22 +35,24 @@ Redis local executa RDB (`save 60 1`) e mantém AOF habilitado; os arquivos fica
 
 O lifespan da API inicia uma publicação imediatamente e repete o ciclo 30 minutos após a conclusão do anterior. Cada ciclo recarrega as definições do Mongo, atualiza a configuração em memória e publica somente as audiências habilitadas, usando dados do PostgreSQL e salvando snapshots no Redis sob o advisory lock compartilhado. Após `seed-tip-audiences`, a definição é carregada e publicada no próximo ciclo; reinício não é necessário.
 
-`ouros-audience-engine run-once --dry-run` verifica manualmente sem publicar; `run-once --publish` força uma execução manual. Ambos usam o mesmo lock. Falhas de leitura do Mongo ou do lock são registradas e tentadas novamente no ciclo seguinte; falhas por audiência são registradas sem impedir as demais. O scheduler roda em cada processo da API; o comando atual do Discloud inicia um processo, mas escalar workers/instâncias causará ciclos redundantes serializados pelo lock. Não há estado persistente de sucesso, métricas ou alertas.
+`ouros-audience-engine run-once --dry-run` verifica sem publicar; `run-once --publish` executa o ciclo completo. Os ciclos serializam-se pelo advisory lock. O ciclo prepara os snapshots e persiste no Redis refs e memberships candidatos antes do CAS; uma falha durante a preparação não publica nenhum snapshot. Falha CAS reinicia com os mesmos candidatos no próximo ciclo; uma falha de entrega mantém o ciclo/outbox pendente até retry. Os deltas contra o baseline só são enviados ao Spring depois de todos os refs confirmados. O scheduler roda em cada processo da API; o lock evita execução simultânea, mas workers extras ainda provocam ciclos redundantes. Não há estado persistente de sucesso, métricas ou alertas.
 
 `/health/ready` verifica dependências da API, mas não confirma que o último ciclo do scheduler publicou snapshots com sucesso.
+
+`SPRING_API_URL` (padrão `https://ms-spring-api.discloud.app`) e `SPRING_INTERNAL_SERVICE_KEY` configuram o dispatcher. Sem chave ou com resposta incompleta, o ciclo/outbox permanece no Redis e o CLI retorna erro; o scheduler tenta novamente no próximo ciclo. Respostas só confirmam lote quando `total_received == total_created + total_skipped`. Reset Redis apaga snapshots, candidato, baseline e ciclos pendentes, risco aceito.
 
 ## Incidentes
 
 - `401` na resolução: confirmar token vigente e correspondência de issuer, JWKS e audience `ms-ouros-audience-engine`; `403` indica role, escopo da fazenda ou `user_id` divergente.
 - `503` da resolução: conferir readiness, PostgreSQL de metadados/origem, conexão Redis e digest/manifest do snapshot.
 - Job falha antes do CAS: o ponteiro anterior continua publicado; chaves Redis imutáveis já gravadas podem ficar sem referência. Não as apague manualmente sem confirmar que não estão apontadas pelo PostgreSQL.
-- Erro CAS (`ConcurrentPublishError`): verificar jobs concorrentes; reexecutar depois que houver uma única execução. O processo não repete/recalcula automaticamente.
+- Erro CAS (`ConcurrentPublishError`): o candidato completo permanece no Redis; não o apague nem force novo ciclo. O scheduler/CLI retomará os mesmos refs e bitmap.
 - Resultado `UNCHANGED_UNKNOWN`: nenhuma fazenda teve avaliação válida; o bitmap anterior é preservado somente para owners ainda vinculados, proprietários removidos são revogados e o watermark fica `NULL`. Investigar freshness/dados; não forçar bitmap vazio.
 - `STALE` no contrato: watermark nulo ou mais antigo que o limite da configuração; cliente deve distinguir isso de resolução.
 - Redis indisponível: a resolução falha fechada com `503`; não há fallback S3. Quando a conexão volta mas um snapshot está ausente, a primeira resolução o reconstrói.
 
 ## Reset e rebuild Redis
 
-API e scheduler serializam rebuilds pelo advisory lock PostgreSQL. Após reset do Redis, o rebuild usa a fonte PostgreSQL como bootstrap novo, sem bitmap anterior; fazendas UNKNOWN podem perder membership até nova medição válida. Se nenhuma fazenda tiver avaliação válida, o rebuild falha e a API continua retornando `503`, em vez de membership vazia.
+Após reset Redis, o rebuild usa a fonte PostgreSQL como bootstrap novo, sem bitmap ou histórico de notificação anterior; fazendas UNKNOWN podem perder membership até nova medição válida e o baseline de notificações reinicia silenciosamente. Se nenhuma fazenda tiver avaliação válida, o rebuild falha e a API continua retornando `503`, em vez de membership vazia.
 
-Não há histórico de transições nem dispatcher neste MVP. A coluna legada `dispatched_through_version` permanece sem uso e não deve ser avançada manualmente.
+Os candidatos, baseline e outbox de notificações residem somente no Redis. A coluna legada `dispatched_through_version` permanece sem uso e não deve ser avançada manualmente.

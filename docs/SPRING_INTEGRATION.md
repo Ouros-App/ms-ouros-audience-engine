@@ -16,17 +16,11 @@ Resposta atual do Engine inclui `user_id`, `tip_ids`, `evaluated_at`, `snapshot_
 
 ## Ativações/notificações
 
-O MVP atual guarda somente snapshots de membership no Redis; não persiste deltas nem emite eventos por membro. Antes de conectar notificações, acordar endpoint batch do Spring e adicionar uma fonte durável de histórico/outbox que sobreviva ao reset do Redis. O endpoint deve:
+O contrato implementado pelo helper é `POST /internal/v1/notifications/batch` com `X-Internal-Service-Key`, em lotes de até 500 notificações. Cada item inclui `event_id`, `user_id`, `user_role`, `title`, `message`, `type`, `id_tip`, `data_payload` e `send_push`. `farm_owners.id` corresponde ao ID de `FARM_OWNER` no Spring: `UserPrincipal.create(FarmOwner)` usa `farmOwner.getId()` e a autorização carrega a fazenda por esse ID.
 
-- valida role e vínculo sem aceitar payload não autenticado;
-- deduplica persistentemente por `event_id` antes de gravar notification;
-- aceita retry idempotente e responde apenas depois do commit durável;
-- dispara FCM após commit/outbox, sem prometer exactly-once externo;
-- distingue ativação, resolução e revogação de acesso; não envia push para resolução/revogação por padrão.
+O helper mantém baseline agregado OR, ciclos pendentes e IDs de membros apenas no Redis; dispatcher recria eventos estáveis e valida contagens antes do ack. `TIP_ACTIVATED` usa push; `TIP_RESOLVED` é in-app; remoções de acesso são suprimidas. Títulos/mensagens neutros: `Nova Dica Técnica!` / `Uma nova dica técnica está disponível para você.` e `Dica resolvida` / `Uma dica técnica foi resolvida para você.`.
 
-Dica ligada a mais de uma audiência usa OR. Uma saída em uma audiência só resolve a dica se o usuário não estiver em nenhuma outra audiência ligada/habilitada. O cálculo precisa comparar estados anterior/novo agregados a partir de histórico durável; os snapshots Redis atuais não permitem reconstruir deltas perdidos após reset. Bootstrap e mudança de regra não fazem push em massa por padrão.
-
-`GET /tips/me`, filtro de `GET /tips/{id}`, alterações `event_id` em notifications, FCM, Android e migration de produção estão fora deste repo e não podem ser declarados concluídos.
+Scheduler e CLI `run-once --publish` preparam todos os snapshots habilitados e persistem refs imutáveis e memberships candidatos no ciclo Redis antes de qualquer CAS. Após reinício ou CAS parcial, retomam os mesmos refs/candidatos; não recalculam membership a partir de snapshots mistos. Só calculam deltas e enviam eventos ao Spring após confirmar todos os refs. O baseline só avança depois da resposta completa de cada lote (`total_created + total_skipped == total_received`). Falhas ou chave ausente mantêm ciclo e outbox pendentes para retry. Não há membership no PostgreSQL. Configure `SPRING_API_URL` (padrão `https://ms-spring-api.discloud.app`) e `SPRING_INTERNAL_SERVICE_KEY`. Reset Redis apaga baseline, candidatos e outbox; sem baseline existente, o próximo ciclo inicializa silenciosamente.
 
 ## API de gerenciamento de audiências
 
