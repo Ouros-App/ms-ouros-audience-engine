@@ -78,6 +78,24 @@ def test_run_once_continues_after_audience_failure_and_returns_nonzero(
     redis_client.close.assert_called_once_with()
 
 
+
+
+def test_run_once_publish_uses_resumable_audience_cycle(monkeypatch, capsys) -> None:
+    runtime = SimpleNamespace(
+        config=SimpleNamespace(audiences=()),
+        mongo_client=Mock(),
+        redis_client=Mock(),
+    )
+    cycle = Mock(return_value=[])
+    monkeypatch.setattr(cli, "get_settings", lambda: SimpleNamespace(environment="development"))
+    monkeypatch.setattr(cli, "build_runtime", lambda _settings: runtime)
+    monkeypatch.setattr(cli, "publish_audience_cycle", cycle)
+    monkeypatch.setattr(sys, "argv", ["ouros-audience-engine", "run-once", "--publish"])
+
+    cli.main()
+
+    cycle.assert_called_once_with(runtime, runtime.config, evaluated_at=None)
+    assert json.loads(capsys.readouterr().out) == []
 def test_run_once_requires_production_infisical_bootstrap(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

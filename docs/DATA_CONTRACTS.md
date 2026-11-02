@@ -61,7 +61,7 @@ Esta regra é didática e não aprovada por negócio/agronomia. O schema fixture
 - Codec: `pyroaring.BitMap`, `pyroaring-portable`, versão de formato `1`; IDs positivos até `2^31-1`.
 - SHA-256 é calculado sobre bytes serializados exatos. O reader valida manifest, digest, formato e bitmap antes de verificar membership.
 - Manifest de snapshot registra ID-space, versão da regra, watermark, quantidade e chaves do bitmap. Não há histórico de transições persistido.
-- Eventos Spring não são materializados nem enviados neste repo; nenhum manifest contém transições.
+Eventos de transição são enviados ao Spring pelo endpoint interno depois de confirmar todos os refs de snapshot; baseline e outbox de membership ficam no Redis. Nenhum manifest contém transições.
 - Nenhum manifest contém nomes, email, tokens ou texto de tip.
 
 ## API de resolução

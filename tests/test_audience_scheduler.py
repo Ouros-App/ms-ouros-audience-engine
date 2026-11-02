@@ -1,66 +1,99 @@
 import asyncio
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from threading import Event as ThreadEvent
 from types import SimpleNamespace
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 from fastapi.testclient import TestClient
 
-from ouros_audience_engine.domain.config import AudienceConfig, AudienceDefinition
-from ouros_audience_engine.domain.tip_audience_catalog import (
-    daily_water_meter_audience,
-    default_tip_audiences,
-)
+from ouros_audience_engine.domain.config import AudienceConfig
+from ouros_audience_engine.domain.tip_audience_catalog import daily_water_meter_audience
 from ouros_audience_engine.main import create_app
 from ouros_audience_engine.services import audience_scheduler
+from ouros_audience_engine.services.audience_publisher import PreparedPublication, PublishResult
 from ouros_audience_engine.settings import Settings
 
 
-def test_publish_cycle_reloads_mongo_and_publishes_only_enabled_definitions() -> None:
-    enabled = daily_water_meter_audience()
-    disabled = default_tip_audiences()[0]
-    config = AudienceConfig(audiences=[enabled, disabled])
-    lock_active = False
-
-    @contextmanager
-    def publish_lock() -> Iterator[None]:
-        nonlocal lock_active
-        lock_active = True
-        try:
-            yield
-        finally:
-            lock_active = False
-
-    def load() -> AudienceConfig:
-        assert lock_active
-        return config
-
-    def publish(_audience: AudienceDefinition) -> SimpleNamespace:
-        assert lock_active
-        return SimpleNamespace(
-            audience_key=enabled.key,
-            status="PUBLISHED",
-            snapshot_version=1,
-            member_count=40,
-        )
-
-    definitions = Mock()
-    definitions.load.side_effect = load
-    lock = Mock(side_effect=publish_lock)
-    publisher = Mock()
-    publisher.publish.side_effect = publish
-    runtime = SimpleNamespace(
-        api=SimpleNamespace(config=AudienceConfig(audiences=[]), definitions=definitions),
-        metadata=SimpleNamespace(publish_job_lock=lock),
-        publisher=publisher,
-    )
+def test_publish_scheduler_delegates_to_resumable_audience_cycle(monkeypatch) -> None:
+    runtime = SimpleNamespace()
+    cycle = Mock(return_value=[])
+    monkeypatch.setattr(audience_scheduler, "publish_audience_cycle", cycle)
 
     audience_scheduler.publish_enabled_audiences(runtime)
 
-    assert runtime.api.config is config
-    lock.assert_called_once_with()
-    assert publisher.publish.call_args_list == [call(enabled)]
+    cycle.assert_called_once_with(runtime, stop_event=None)
+
+
+def test_partial_publication_resumes_persisted_candidates_before_delivery() -> None:
+    class MemoryRedis:
+        def __init__(self, values: dict[str, bytes]) -> None:
+            self.values = values
+
+        def get(self, key: str) -> bytes | None:
+            return self.values.get(key)
+
+        def delete(self, key: str) -> None:
+            self.values.pop(key, None)
+
+    result = PublishResult("a", "UNCHANGED", 4, 1, 0, 1, 0, 0, 0, None)
+    prepared = [
+        PreparedPublication(key, 4, 4, None, None, "digest", "1", None, None, (42,), result, False)
+        for key in ("a", "b")
+    ]
+    cycle_record = {
+        "publications": [item.to_dict() for item in prepared],
+        "tips": [
+            {
+                "tip_id": 9,
+                "signature": "stable",
+                "members": [42],
+                "revoked_ids": [],
+                "transition_id": "snapshots",
+            }
+        ],
+    }
+    key = audience_scheduler._PENDING_PUBLICATION_KEY
+    redis_client = MemoryRedis({key: json.dumps(cycle_record).encode()})
+    attempts: list[str] = []
+
+    class Publisher:
+        def publish(self, *_args, **_kwargs):
+            raise AssertionError("resumption must not reevaluate candidates")
+
+        def publish_prepared(self, item):
+            attempts.append(item.audience_key)
+            if attempts == ["a", "b"]:
+                raise RuntimeError("partial CAS")
+            return item.result
+
+    @contextmanager
+    def lock() -> Iterator[None]:
+        yield
+
+    runtime = SimpleNamespace(
+        redis_client=redis_client,
+        metadata=SimpleNamespace(publish_job_lock=lock),
+        publisher=Publisher(),
+        notification_state=SimpleNamespace(stage=Mock()),
+        notification_dispatcher=SimpleNamespace(dispatch_pending=Mock(return_value=True)),
+    )
+    try:
+        audience_scheduler.publish_audience_cycle(runtime)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("the simulated partial publication must fail")
+    runtime.notification_dispatcher.dispatch_pending.assert_not_called()
+    assert redis_client.get(key) is not None
+
+    audience_scheduler.publish_audience_cycle(runtime)
+
+    assert attempts == ["a", "b", "a", "b"]
+    runtime.notification_dispatcher.dispatch_pending.assert_called_once_with(9)
+    assert redis_client.get(key) is None
 
 
 def test_periodic_runner_repeats_and_stops_cleanly(monkeypatch) -> None:
@@ -125,13 +158,23 @@ def test_app_shutdown_stops_an_in_flight_publication(monkeypatch) -> None:
         yield
 
     class Publisher:
-        def publish(self, _audience, *, stop_event: ThreadEvent):
+        def publish(
+            self,
+            _audience,
+            *,
+            evaluated_at: datetime | None = None,
+            stop_event: ThreadEvent,
+            prepare_only: bool = False,
+        ):
+            assert prepare_only
             publication_started.set()
             assert stop_event.wait(1)
             publication_stopped.set()
             raise InterruptedError("publication stopped for shutdown")
 
     class ClosingClient:
+        def get(self, _key: str):
+            return None
         def close(self) -> None:
             assert publication_stopped.is_set()
             close_calls.append(True)

@@ -22,12 +22,22 @@ class Settings(BaseSettings):
     source_database_url: str = ""
     metadata_database_url: str = ""
     source_timeout_seconds: int = Field(default=5, ge=1, le=30)
+    spring_api_url: str = "https://ms-spring-api.discloud.app"
+    spring_internal_service_key: str = ""
     allow_manual_run: bool = False
 
     @model_validator(mode="after")
     def require_production_secrets(self) -> "Settings":
         if self.environment.lower() != "production":
             return self
+        spring_api = urlparse(self.spring_api_url)
+        if (
+            spring_api.scheme != "https"
+            or not spring_api.hostname
+            or spring_api.username
+            or spring_api.password
+        ):
+            raise ValueError("SPRING_API_URL must use HTTPS")
         issuer = urlparse(self.keycloak_issuer_url)
         if issuer.scheme != "https" or not issuer.hostname or issuer.username or issuer.password:
             raise ValueError("KEYCLOAK_ISSUER_URL must use HTTPS")

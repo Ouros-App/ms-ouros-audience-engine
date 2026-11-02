@@ -18,6 +18,7 @@ from ouros_audience_engine.repositories.source_postgres import FarmData, WaterMe
 from ouros_audience_engine.services.audience_publisher import (
     AudiencePublisher,
     NoValidEvaluation,
+    PreparedPublication,
 )
 
 
@@ -254,6 +255,35 @@ def test_publisher_refuses_empty_rebuild_when_all_farms_are_unknown() -> None:
         publisher.publish(config, evaluated_at=datetime(2026, 10, 2, tzinfo=UTC))
 
     assert metadata.get_snapshot_ref(config.key).snapshot_version == 1
+
+
+
+
+def test_prepared_publication_does_not_cas_until_resumed_and_is_idempotent() -> None:
+    config = default_tip_audiences()[0].model_copy(update={"enabled": True})
+    evaluated_at = datetime(2026, 10, 1, 12, tzinfo=UTC)
+    signals: dict[str, bool | int | float] = {
+        "nipple_setup_out_of_age_target": True,
+        "nipple_flow_ml_min": 75,
+    }
+    source = MemorySource({}, {1: {101, 102}})
+    metadata = MemoryMetadata()
+    metadata.observations = {
+        1: TipObservation(1, config.tip_id, datetime(2026, 10, 1, 10, tzinfo=UTC), signals)
+    }
+    codec = BitmapCodec()
+    store = MemoryStore(codec)
+    publisher = AudiencePublisher(source, metadata, store, codec)
+
+    prepared = publisher.publish(config, evaluated_at=evaluated_at, prepare_only=True)
+
+    assert isinstance(prepared, PreparedPublication)
+    assert metadata.get_snapshot_ref(config.key).snapshot_version == 0
+    assert prepared.member_ids == (101, 102)
+    result = publisher.publish_prepared(PreparedPublication.from_dict(prepared.to_dict()))
+    assert result.snapshot_version == 1
+    assert list(store.get_bitmap(metadata.get_snapshot_ref(config.key))) == [101, 102]
+    assert publisher.publish_prepared(prepared) == result
 
 
 def test_tip_publisher_preserves_stale_membership_then_resolves_valid_data() -> None:

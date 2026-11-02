@@ -5,6 +5,7 @@ from dataclasses import asdict
 from datetime import UTC, datetime
 
 from ouros_audience_engine.runtime import build_runtime
+from ouros_audience_engine.services.audience_scheduler import publish_audience_cycle
 from ouros_audience_engine.services.tip_audience_seed import seed_tip_audiences
 from ouros_audience_engine.settings import get_settings
 
@@ -33,7 +34,11 @@ def main() -> None:
     mode.add_argument(
         "--dry-run", action="store_true", help="evaluate without publishing snapshots"
     )
-    mode.add_argument("--publish", action="store_true", help="publish snapshots to Redis")
+    mode.add_argument(
+        "--publish",
+        action="store_true",
+        help="publish snapshots and deliver pending notifications",
+    )
     run_once.add_argument(
         "--as-of",
         type=_parse_as_of,
@@ -65,30 +70,45 @@ def main() -> None:
 
         failed = False
         results: list[dict[str, object]] = []
-        with runtime.metadata.publish_job_lock():
-            for audience in runtime.config.audiences:
-                try:
-                    publish_result = runtime.publisher.publish(
-                        audience,
+        if args.publish:
+            try:
+                results = [
+                    asdict(result)
+                    for result in publish_audience_cycle(
+                        runtime,
+                        runtime.config,
                         evaluated_at=args.as_of,
-                        dry_run=args.dry_run,
                     )
-                except Exception as exc:
-                    failed = True
-                    error_type = type(exc).__name__
-                    print(
-                        f"audience {audience.key} failed ({error_type})",
-                        file=sys.stderr,
-                    )
-                    results.append(
-                        {
-                            "audience_key": audience.key,
-                            "status": "FAILED",
-                            "error": error_type,
-                        }
-                    )
-                else:
-                    results.append(asdict(publish_result))
+                ]
+            except Exception as exc:
+                failed = True
+                error_type = type(exc).__name__
+                print(f"audience cycle failed ({error_type})", file=sys.stderr)
+        else:
+            with runtime.metadata.publish_job_lock():
+                for audience in runtime.config.audiences:
+                    try:
+                        publish_result = runtime.publisher.publish(
+                            audience,
+                            evaluated_at=args.as_of,
+                            dry_run=True,
+                        )
+                    except Exception as exc:
+                        failed = True
+                        error_type = type(exc).__name__
+                        print(
+                            f"audience {audience.key} failed ({error_type})",
+                            file=sys.stderr,
+                        )
+                        results.append(
+                            {
+                                "audience_key": audience.key,
+                                "status": "FAILED",
+                                "error": error_type,
+                            }
+                        )
+                    else:
+                        results.append(asdict(publish_result))
         print(json.dumps(results, default=_json_default, indent=2))
         if failed:
             raise SystemExit(1)
